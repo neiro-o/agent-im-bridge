@@ -833,7 +833,11 @@ export async function runCli(argv = process.argv): Promise<void> {
 
   const queue = program
     .command("queue")
-    .description("Manage event queues (Markdown files under ~/.config/agent-bridge/queues)");
+    .description("Manage event queues (Markdown files under ~/.config/agent-bridge/queues)")
+    .addHelpText(
+      "after",
+      "Tip: a pending task is a plain Markdown file under ~/.config/agent-bridge/queues/<name>.tasks/ — edit or delete the file to modify or remove it.",
+    );
 
   queue
     .command("add")
