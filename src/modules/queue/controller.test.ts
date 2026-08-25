@@ -120,7 +120,7 @@ async function createHarness(
 async function seedQueue(
   root: string,
   name: string,
-  options: { channel?: string; workers?: number; model?: string; target?: string; body?: string; silence?: string },
+  options: { channel?: string; workers?: number; model?: string; target?: string; body?: string; silence?: string; timeout?: string },
   prompts: string[],
 ): Promise<string[]> {
   // `queue add` no longer writes `channel` (T1): an owned queue must have a
@@ -134,6 +134,7 @@ async function seedQueue(
     `workers: ${options.workers ?? 1}`,
     ...(options.model !== undefined ? [`model: ${options.model}`] : []),
     ...(options.silence !== undefined ? [`silence: ${options.silence}`] : []),
+    ...(options.timeout !== undefined ? [`timeout: ${options.timeout}`] : []),
     ...(options.target !== undefined ? [`target: ${options.target}`] : []),
     "---",
     "",
@@ -1114,6 +1115,112 @@ describe("silence probe (T4, layer 2)", () => {
       type: "assistant.message",
       clientSessionId: TARGET,
       text: `done now\n\n${completedSuffix(h, "q", `queue:q:${ids[0]}`)}`,
+    });
+  });
+});
+
+describe("per-queue timeout (definition `timeout:` front matter)", () => {
+  it("times out a run with the queue's timeout, overriding the controller fallback", async () => {
+    // Controller fallback is 5 s (harness default), queue pins 1 s.
+    const h = await createHarness();
+    const [id] = await seedQueue(h.root, "q", { target: TARGET, timeout: "1s" }, ["a"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    // No controller.handleOutput arrives; the queue's 1 s timer fires.
+    await waitFor(() => expect(h.delivered).toHaveLength(1));
+    expect(h.dispatched[2]).toEqual({
+      type: "command.session.stop",
+      clientSessionId: `queue:q:${id}`,
+    });
+    await waitFor(async () => expect(await listQueueTasks("q", h.root)).toHaveLength(0));
+    // The history reason carries the queue's timeout, not the fallback.
+    await waitFor(async () => expect(await history(h)).toHaveLength(1));
+    expect((await history(h))[0]).toMatchObject({
+      runId: `queue:q:${id}`,
+      outcome: "timeout",
+      reason: "timed out after 1000ms",
+    });
+  });
+
+  it("uses the controller fallback when the queue sets no timeout", async () => {
+    // No `timeout:` line in the definition: the harness's runTimeoutMs (50
+    // ms) applies.
+    const h = await createHarness({ runTimeoutMs: 50 });
+    const [id] = await seedQueue(h.root, "q", { target: TARGET }, ["a"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    await waitFor(async () => expect(await history(h)).toHaveLength(1));
+    expect((await history(h))[0]).toMatchObject({
+      runId: `queue:q:${id}`,
+      outcome: "timeout",
+      reason: "timed out after 50ms",
+    });
+  });
+
+  it("applies an edited timeout to a run fired after the edit (30 s hot reload)", async () => {
+    const h = await createHarness({ runTimeoutMs: 60_000 });
+    const [first] = await seedQueue(h.root, "q", { target: TARGET, workers: 1 }, ["a", "b"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2)); // first task fired
+
+    // Finish the first run with DONE so the worker slot frees up.
+    await h.controller.handleOutput({
+      type: "assistant.message",
+      clientSessionId: `queue:q:${first}`,
+      text: `done\n${DONE_MARKER}`,
+    });
+    await waitFor(() => expect(h.delivered).toHaveLength(1));
+
+    // Edit the definition: add timeout: 1s. The next tick reloads it.
+    const definitionPath = path.join(h.root, "q.md");
+    await writeFile(
+      definitionPath,
+      `---\nchannel: test\nworkers: 1\ntarget: ${TARGET}\ntimeout: 1s\n---\n\n`,
+      "utf8",
+    );
+
+    // Second task fires under the reloaded definition and times out at 1 s.
+    // The id is taken from the dispatched session.new (race-free: listing
+    // task files could miss a task whose timeout already fired and file was
+    // deleted).
+    await waitFor(() =>
+      expect(h.dispatched.filter((e) => e.type === "command.session.new")).toHaveLength(2),
+    );
+    const secondFire = h.dispatched.filter((e) => e.type === "command.session.new")[1]!;
+    const secondId = secondFire.clientSessionId.slice("queue:q:".length);
+    await waitFor(() => expect(h.delivered).toHaveLength(2));
+    await waitFor(async () => expect(await listQueueTasks("q", h.root)).toHaveLength(0));
+    await waitFor(async () => expect(await history(h)).toHaveLength(2));
+    expect((await history(h))[1]).toMatchObject({
+      runId: `queue:q:${secondId}`,
+      outcome: "timeout",
+      reason: "timed out after 1000ms",
+    });
+  });
+
+  it("does not retroactively change an in-flight run's timer on a mid-run edit", async () => {
+    // Fire under timeout: 1s, then edit to a much larger value while the run
+    // is in flight: the already-armed 1 s timer must still fire (fire-time
+    // capture — the record is never re-read).
+    const h = await createHarness({ runTimeoutMs: 60_000 });
+    const [id] = await seedQueue(h.root, "q", { target: TARGET, timeout: "1s" }, ["a"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    // Mid-run edit: bump the definition's timeout far beyond the armed timer.
+    const definitionPath = path.join(h.root, "q.md");
+    const original = await readFile(definitionPath, "utf8");
+    await writeFile(definitionPath, original.replace("timeout: 1s", "timeout: 1h"), "utf8");
+
+    // The in-flight run still times out at the fire-time value (1 s).
+    await waitFor(() => expect(h.delivered).toHaveLength(1));
+    await waitFor(async () => expect(await history(h)).toHaveLength(1));
+    expect((await history(h))[0]).toMatchObject({
+      runId: `queue:q:${id}`,
+      outcome: "timeout",
+      reason: "timed out after 1000ms",
     });
   });
 });

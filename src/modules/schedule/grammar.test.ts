@@ -157,4 +157,10 @@ describe("parseTimeout", () => {
       if (!r.ok) expect(r.reason.length).toBeGreaterThan(0);
     }
   });
+
+  it("accepts up to 24h and rejects beyond (Node setTimeout overflows past 2^31-1 ms)", () => {
+    expect(parseTimeout("24h")).toEqual({ ok: true, ms: 86_400_000 });
+    expect(parseTimeout("600h")).toEqual({ ok: false, reason: "timeout must be at most 24h" });
+    expect(parseTimeout("1500m")).toEqual({ ok: false, reason: "timeout must be at most 24h" });
+  });
 });

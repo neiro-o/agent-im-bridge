@@ -24,6 +24,9 @@ export type ParseTimeoutResult = { ok: true; ms: number } | { ok: false; reason:
 const UNIT_MS = { m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
 const TIMEOUT_UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000 } as const;
 
+/** Upper bound of a parsed timeout duration: 24 h (Node's setTimeout overflows past 2^31-1 ms). */
+const MAX_TIMEOUT_MS = 24 * 60 * 60_000;
+
 const WEEKDAYS: Record<string, Weekday> = {
   mon: 0,
   tue: 1,
@@ -108,7 +111,14 @@ export function parseTimeout(input: string): ParseTimeoutResult {
   if (n < 1) {
     return { ok: false, reason: "timeout must be at least 1" };
   }
-  return { ok: true, ms: n * TIMEOUT_UNIT_MS[m[2] as keyof typeof TIMEOUT_UNIT_MS] };
+  const ms = n * TIMEOUT_UNIT_MS[m[2] as keyof typeof TIMEOUT_UNIT_MS];
+  // Node's setTimeout overflows past 2^31-1 ms (the timer fires ~immediately
+  // with a warning), so an over-long duration would insta-timeout the run
+  // it was meant to allow. 24 h is far beyond any sane run length.
+  if (ms > MAX_TIMEOUT_MS) {
+    return { ok: false, reason: `timeout must be at most 24h` };
+  }
+  return { ok: true, ms };
 }
 
 function parseEvery(parts: string[]): ParseScheduleResult {

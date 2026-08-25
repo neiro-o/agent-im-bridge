@@ -79,6 +79,7 @@ describe("parseQueueDefinition", () => {
       channel: "feishu-dev",
       workers: 2,
       silenceMs: DEFAULT_SILENCE_MS,
+      timeoutMs: undefined,
       model: "azure-openai-responses/gpt-5.6-terra",
       target: "feishu:dm:oc_6f9d408e630098e6dd06bb071d6b60fc",
       enabled: true,
@@ -99,6 +100,7 @@ describe("parseQueueDefinition", () => {
       channel: "wecom-dev",
       workers: DEFAULT_WORKERS,
       silenceMs: DEFAULT_SILENCE_MS,
+      timeoutMs: undefined,
       model: undefined,
       target: undefined,
       enabled: true,
@@ -164,6 +166,39 @@ Body.
     expect(errors).toEqual([]);
     expect(warnings).toEqual([]);
     expect(definition?.silenceMs).toBe(5 * 60_000);
+  });
+
+  it("parses the optional timeout duration with the timeout syntax, absent by default", () => {
+    const { definition, errors, warnings } = parseQueueDefinition(
+      "timeout.md",
+      "---\nchannel: feishu-dev\ntimeout: 1h\n---\nBody.\n",
+    );
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(definition?.timeoutMs).toBe(60 * 60_000);
+  });
+
+  it("leaves timeoutMs undefined when the field is absent or blank", () => {
+    for (const raw of [null, "timeout:", "timeout:  ", 'timeout: ""']) {
+      const frontMatter = raw === null ? "" : `${raw}\n`;
+      const { definition, errors } = parseQueueDefinition(
+        "no-timeout.md",
+        `---\nchannel: feishu-dev\n${frontMatter}---\nBody.\n`,
+      );
+      expect(errors).toEqual([]);
+      expect(definition?.timeoutMs).toBeUndefined();
+    }
+  });
+
+  it("rejects an invalid timeout value and drops the definition", () => {
+    const { definition, errors } = parseQueueDefinition(
+      "bad-timeout.md",
+      "---\nchannel: feishu-dev\ntimeout: 10x\n---\nBody.\n",
+    );
+    expect(errors).toEqual([
+      'invalid timeout "10x": invalid timeout "10x" — expected like "10m", "1h" or "90s"',
+    ]);
+    expect(definition).toBeNull();
   });
 
   it("treats a blank silence as unset (defaults to 10m)", () => {
