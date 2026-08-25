@@ -28,9 +28,10 @@ All state lives under `~/.config/agent-bridge/queues/`.
 
 ```markdown
 ---
-channel: feishu-dev        # owning channel; written by `queue add`
+channel: feishu-dev        # owning channel; ABSENT until /queue-here writes it
 workers: 2                 # max concurrent tasks; integer >= 1, default 1
 silence: 10m               # optional; silence window before a probe (same syntax as timeout, default 10m)
+timeout: 1h                # optional; wall-clock run limit (same syntax and 5h default as scheduled tasks)
 model: provider/model-id   # optional; blank/absent = channel default model
 target: chat:xxx           # delivery address; written by /queue-here
 enabled: true              # optional; `false` = persistent disable switch
@@ -73,8 +74,9 @@ ownership rule as the scheduler).
   `queue:<queueName>:<taskId>`; `dispatchClientEvent` a `session.new`
   (carrying `model` when the queue pins one), check the `IngressResult`;
   on `ok` dispatch `user.message` with `<queue body>\n\n<task prompt>\n\n<completion-protocol block>` (the body is empty when blank; the fixed protocol block is the T4 DONE-marker instruction).
-  A run carries a timeout timer (same 10-minute default as scheduled tasks)
-  and a silence probe (`silence` front matter, default 10m).
+  A run carries a timeout timer set from the queue's `timeout` front matter
+  (same duration syntax and 5-hour default as scheduled tasks) and a
+  silence probe (`silence` front matter, default 10m).
 - **Completion (three-layer protocol, T4)**: the old "first
   `assistant.message` ends the run" semantics is gone. Every `assistant.message`
   is accumulated into a per-run file under `run-outputs/`; a run completes only

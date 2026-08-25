@@ -25,8 +25,12 @@ import path from "node:path";
 import { SCHEDULES_DIR } from "../../config/channel-state";
 import { parseSchedule, parseTimeout, type Schedule } from "./grammar";
 
-/** Default max run duration: `10m` (spec D3). */
-export const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+/**
+ * Default max run duration: `5h`. Unattended runs (queues, schedules) may
+ * legitimately take hours; the timeout is destructive (abort + drop, no
+ * retry), so the default errs long — tighten per task/queue via `timeout:`.
+ */
+export const DEFAULT_TIMEOUT_MS = 5 * 60 * 60_000;
 
 /** Default silence window before a probe is sent: `10m` (2026-08-19 grill, layer 2). */
 export const DEFAULT_SILENCE_MS = 10 * 60_000;

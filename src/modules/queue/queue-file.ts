@@ -5,8 +5,10 @@
  * Storage root: `~/.config/agent-bridge/queues/`, mirroring the schedules
  * layout. A queue definition is `queues/<name>.md` — front matter `channel`
  * (optional, absent until the queue is bound; written by `/queue-here`),
- * `workers` (integer >= 1, default 1), `model` (optional, blank/absent →
- * undefined), `target` (optional, non-empty, written by `/queue-here`) —
+ * `workers` (integer >= 1, default 1), `timeout` (optional duration like
+ * `10m`; default 10m via the controller — the wall-clock limit of this
+ * queue's runs), `model` (optional, blank/absent → undefined), `target`
+ * (optional, non-empty, written by `/queue-here`) —
  * and its body is the shared context appended to every task prompt. Tasks
  * live in `queues/<name>.tasks/<taskId>.md`; a `taskId` is
  * `<enqueueMs>-<random4>`, so lexicographic file-name order IS the FIFO
@@ -47,7 +49,15 @@ const TASK_ID_RE = /^\d+-[0-9a-f]{4}$/;
 
 const TASK_STATES = new Set(["pending", "running"]);
 
-const KNOWN_DEFINITION_KEYS = new Set(["channel", "workers", "silence", "model", "target", "enabled"]);
+const KNOWN_DEFINITION_KEYS = new Set([
+  "channel",
+  "workers",
+  "silence",
+  "timeout",
+  "model",
+  "target",
+  "enabled",
+]);
 const KNOWN_TASK_KEYS = new Set(["state", "enqueuedAt"]);
 
 /** A parsed, validated queue definition (spec D1). */
@@ -70,6 +80,14 @@ export interface QueueDefinition {
    * {@link DEFAULT_SILENCE_MS}.
    */
   silenceMs: number;
+  /**
+   * Max run duration (wall-clock timeout) for this queue's tasks, parsed
+   * from the definition's `timeout:` front matter (same duration syntax as
+   * a scheduled task's `timeout:`). Absent when the field is not set — the
+   * controller then falls back to its own default (the same 5-hour
+   * constant as scheduled tasks, `DEFAULT_TIMEOUT_MS` in task-file.ts).
+   */
+  timeoutMs: number | undefined;
   /** Worker model override; absent/blank → the channel agent config's model. */
   model: string | undefined;
   /** Delivery address — the destination chat's clientSessionId, written by `/queue-here`. */
@@ -212,6 +230,16 @@ export function parseQueueDefinition(
     }
   }
 
+  let timeoutMs: number | undefined;
+  if (fields.timeout !== undefined && fields.timeout.trim() !== "") {
+    const parsed = parseTimeout(fields.timeout);
+    if (parsed.ok) {
+      timeoutMs = parsed.ms;
+    } else {
+      errors.push(`invalid timeout "${fields.timeout}": ${parsed.reason}`);
+    }
+  }
+
   const definition: QueueDefinition | null =
     errors.length === 0
       ? {
@@ -219,6 +247,7 @@ export function parseQueueDefinition(
           channel,
           workers,
           silenceMs,
+          timeoutMs,
           model: nonEmptyString(fields.model),
           target: nonEmptyString(fields.target),
           // Only the exact value `false` (case-insensitive) disables; same

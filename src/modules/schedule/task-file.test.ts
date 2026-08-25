@@ -57,7 +57,7 @@ describe("parseTaskFile", () => {
     });
   });
 
-  it("applies defaults: timeout 10m, enabled true, optional keys absent", () => {
+  it("applies defaults: timeout 5h, enabled true, optional keys absent", () => {
     const { task, errors } = parseTaskFile(
       "minimal.md",
       "---\nschedule: every 30m\n---\nDo the thing.\n",

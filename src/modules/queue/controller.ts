@@ -13,8 +13,9 @@
  *   their task files) are never touched;
  * - the run registry: one record per run, keyed by the run-unique synthetic
  *   session id `queue:<queue-name>:<task-id>` (spec D1), each with its own
- *   timeout timer (same 10-minute default as scheduled tasks); a run ends
- *   when the controller receives its completion/failure signal through
+ *   timeout timer set from the queue's `timeout` front matter (5-hour
+ *   default, same as scheduled tasks); a run ends when the controller
+ *   receives its completion/failure signal through
  *   {@link QueueController.handleOutput} or when the timer fires;
  * - firing: a synthetic `command.session.new` (carrying the queue's pinned
  *   `model` when it has one) followed by a `user.message` whose text is the
@@ -61,8 +62,10 @@ export interface QueueControllerOptions {
   channelName: string;
   tickMs?: number;
   /**
-   * Max run duration in ms before a task times out; defaults to the same
-   * 10-minute constant as scheduled tasks (spec D2).
+   * Fallback max run duration in ms before a task times out; a queue
+   * definition's `timeout:` front matter takes precedence over this
+   * (spec D2). Defaults to the same 5-hour constant as scheduled
+   * tasks.
    */
   runTimeoutMs?: number;
   /** Dispatches synthetic client-output events into the core's ingress (spec D2). */
@@ -92,6 +95,8 @@ interface RunRecord {
   target: string;
   /** Silence window for the probe, from the queue definition (T4). */
   silentMs: number;
+  /** Wall-clock run timeout captured at fire time, from the queue definition. */
+  timeoutMs: number;
   /** Registration time (epoch ms); the history line's duration base (D2). */
   startedAt: number;
   timer: NodeJS.Timeout;
@@ -132,6 +137,15 @@ export class QueueController {
     this.#outputsDir = options.outputsDir;
     this.#historyRoot = options.historyRoot;
     this.#logger = options.logger ?? createLogger("queue");
+  }
+
+  /**
+   * Effective run timeout for a queue: the definition's `timeout:` value
+   * when set, else the controller-level fallback (`runTimeoutMs` option,
+   * tests use it to shorten runs; default {@link DEFAULT_TIMEOUT_MS}).
+   */
+  #effectiveRunTimeout(definition: QueueDefinition): number {
+    return definition.timeoutMs ?? this.#runTimeoutMs;
   }
 
   /**
@@ -482,10 +496,10 @@ export class QueueController {
     record.probe.stop();
     const { queueName, taskId, target } = record;
     this.#logger.warn(
-      `[queue] task "${taskId}" of queue "${queueName}" timed out after ${this.#runTimeoutMs}ms`,
+      `[queue] task "${taskId}" of queue "${queueName}" timed out after ${record.timeoutMs}ms`,
     );
     await this.#writeHistory(record, "timeout", {
-      reason: `timed out after ${this.#runTimeoutMs}ms`,
+      reason: `timed out after ${record.timeoutMs}ms`,
     });
     // Abort this run's own session (same core command as the scheduler).
     await this.#dispatchSafe({
@@ -507,6 +521,10 @@ export class QueueController {
   async #registerRun(definition: QueueDefinition, task: QueueTask, target: string): Promise<RunRecord | null> {
     if (!this.#started) return null;
     const sessionId = `${QUEUE_SESSION_PREFIX}${definition.name}:${task.id}`;
+    // Captured once so the record's value and the timer duration are
+    // identical by construction; a mid-run definition edit cannot touch an
+    // already-running timer (the next fired run picks up the new value).
+    const timeoutMs = this.#effectiveRunTimeout(definition);
     // T4: per-run output accumulator and silence probe, alongside the
     // existing wall-clock timeout (the layer-3 backstop). The probe is armed
     // (poked) at run start so its silence window opens as soon as the run
@@ -524,6 +542,7 @@ export class QueueController {
       taskId: task.id,
       target,
       silentMs: definition.silenceMs,
+      timeoutMs,
       startedAt: Date.now(),
       accumulator: createRunAccumulator({
         sessionId,
@@ -532,7 +551,7 @@ export class QueueController {
       probe,
       timer: setTimeout(() => {
         void this.#handleTimeout(sessionId);
-      }, this.#runTimeoutMs),
+      }, timeoutMs),
       // agentSessionId lands here right after session.new succeeds (D5).
     };
     record.timer.unref?.();

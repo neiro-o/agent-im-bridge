@@ -67,6 +67,7 @@ A queue definition is front matter plus a body:
 ---
 workers: 2                 # max concurrent tasks; integer >= 1, default 1
 silence: 10m               # optional; silence window before a probe (same syntax as timeout, default 10m)
+timeout: 1h                # optional; wall-clock run limit (same syntax and 5h default as scheduled tasks)
 model: azure-openai-responses/gpt-5.6-terra   # optional; blank/absent = channel default model
 channel: feishu-dev        # owning channel; ABSENT until /queue-here writes it
 target: feishu:dm:oc_6f9d408e630098e6dd06bb071d6b60fc   # written by /queue-here
@@ -86,11 +87,12 @@ You are the release bot. Always answer in one short paragraph.
 | `channel` | no (absent until bound) | — | Owning channel config name, written by `/queue-here` at bind time together with `target`. Only that channel's controller consumes the queue (and its tasks). A queue without `channel` is owned by no controller and is never consumed — `queue add` does not write it. |
 | `workers` | no | `1` | Max concurrent tasks, integer >= 1. On each tick the controller starts up to `workers - inFlight` new tasks. |
 | `silence` | no | `10m` | Silence window before a probe is sent into a run: same duration syntax as `timeout`. After this many minutes with no observable run activity, the controller asks the run whether it is finished (see [Completion](#completion)). An invalid value fails validation and the queue is skipped with a log. |
+| `timeout` | no | `5h` | Max wall-clock duration of a run (`90s` / `10m` / `1h`): same duration syntax and 5-hour default as a scheduled task's `timeout`. Unattended runs may legitimately take hours and the timeout is destructive (abort + drop, no retry), so the default errs long. The value is captured when a task fires, so an edit affects runs fired after the edit, not in-flight ones. An invalid value fails validation and the queue is skipped with a log. |
 | `model` | no | — | Optional per-queue agent model override for every run of the queue (same override plumbing as scheduled tasks' per-task model). Blank or absent = the channel agent config's model. Parsing only checks for a non-empty string; validity is enforced at fire time — an invalid model fails the session creation, which fails the task (see [Failure: fail-and-drop](#failure-fail-and-drop)). |
 | `target` | no | — | Delivery address: the destination chat's clientSessionId, written by `/queue-here <name>` sent in that chat. Without it the queue is never consumed — tasks pile up until a chat is bound. |
 | `enabled` | no | `true` | `false` (case-insensitive) disables the queue: the controller never consumes it — pending tasks pile up untouched (in-flight runs are unaffected and finish normally). Any other value or absence means enabled. Re-enabling drains the backlog automatically on the next tick. Toggle with `agent-bridge queue enable|disable <queue-name>` or by editing the file. |
 
-`queue add` writes the front matter with `workers` (default `1`) and `model` (only if you entered a non-empty one), plus an empty body — **no `channel`, no `target`, no `enabled`**: a fresh queue is unbound and ownerless until `/queue-here` writes both lines in one atomic edit. It does not offer a `silence` prompt — that field is set (and tuned) by editing the file, defaulting to `10m`.
+`queue add` writes the front matter with `workers` (default `1`) and `model` (only if you entered a non-empty one), plus an empty body — **no `channel`, no `target`, no `enabled`**: a fresh queue is unbound and ownerless until `/queue-here` writes both lines in one atomic edit. It does not offer `silence`/`timeout` prompts — those fields are set (and tuned) by editing the file, defaulting to `10m`.
 
 ## Task files
 
@@ -147,7 +149,7 @@ The per-channel queue controller runs next to the scheduler and only consumes qu
 
 1. On its tick the controller reloads the queue definitions and, for every bound queue (`target` set), computes **capacity = workers − inFlight**, takes the oldest `pending` tasks up to that capacity, marks them `running`, and fires each.
 2. **Fire** injects two synthetic events through the same ingress path ordinary chat messages use: a `command.session.new` with the bridge process's working directory and the queue's pinned `model` (when it has one) — the override rides the same event into the agent-session creation, so only this queue's runs use it — followed by a `user.message` whose text is `<queue body>\n\n<task prompt>` (the bare prompt when the body is empty), wrapped with the fixed completion-protocol instruction block. Both carry a synthetic, run-unique client session id of the form `queue:<queue-name>:<task-id>`.
-3. Each run carries a timeout timer — the same 10-minute default as scheduled tasks — and a silence probe (`silence` front matter, default `10m`). A run ends by completing, failing, or timing out.
+3. Each run carries a timeout timer set from the queue's `timeout` front matter (5-hour default, same as scheduled tasks) and a silence probe (`silence` front matter, default `10m`). A run ends by completing, failing, or timing out.
 
 ### Completion
 
@@ -175,7 +177,7 @@ A task fails for exactly one of three reasons, and in every case the task file i
 
 *Queue "<name>" task failed*`), and the task is dropped. There is no fallback to the channel default model — the follow-up prompt is never sent, so the task cannot silently run on the wrong model. (A bad model is the usual cause; treat the `model` field as "pin it and verify the first task succeeded on the intended model".)
 - **Runtime error** — a terminal `error` event during the run delivers the same format — the error reason first, then the italic one-liner `*Queue "<name>" task failed · full output: <path>*` — and drops the task. The partial transcript is **not** inlined; it stays in the kept accumulation file the suffix references.
-- **Timeout** — the run exceeds the 10-minute default timeout: the controller aborts that run's session and delivers the italic one-liner `*Queue "<name>" task timed out · full output: <path>*`. The partial transcript is **not** inlined; it stays in the kept accumulation file.
+- **Timeout** — the run exceeds its wall-clock limit (the queue's `timeout` front matter, 5-hour default): the controller aborts that run's session and delivers the italic one-liner `*Queue "<name>" task timed out · full output: <path>*`. The partial transcript is **not** inlined; it stays in the kept accumulation file.
 
 ### Restart semantics: at-least-once
 

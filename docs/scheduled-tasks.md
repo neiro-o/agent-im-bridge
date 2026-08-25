@@ -19,7 +19,7 @@ The most important property is **isolation**: a task run never touches the targe
    - a task name (lowercase letters, digits and hyphens only, e.g. `daily-report`; names are globally unique — there is no channel selection),
    - a schedule string (validated against the grammar below, re-prompted on error, with examples shown),
    - an optional working directory (blank = the bridge process's current directory),
-   - a timeout (default `10m`),
+   - a timeout (default `5h`),
    - an optional model (blank = the channel agent config's default model; it is not validated — the CLI can't reach provider model lists, so an invalid value only surfaces when the task runs; see [How a run works](#how-a-run-works) for the exact failure behavior).
 
    It writes a task file with an example prompt body, prints the file path, and prints the targeting instruction.
@@ -94,7 +94,7 @@ yesterday's errors.
 | --- | --- | --- | --- |
 | `schedule` | yes | — | Schedule grammar string (see below). Missing or invalid → the task is listed with an error and never fires. |
 | `directory` | no | bridge process cwd | Working directory of the new session. `~` is expanded, relative paths resolve against the bridge process cwd, and the path is canonicalized (`realpath`) and checked at fire time — it must exist, be a directory, and be readable. An invalid directory prevents the fire and an error is sent to the target chat. |
-| `timeout` | no | `10m` | Max run duration: `<n>s`, `<n>m` or `<n>h` (e.g. `90s`, `10m`, `1h`). The run is killed when exceeded and the target chat receives a timeout notice. An invalid value is listed as an error and the default is used. |
+| `timeout` | no | `5h` | Max run duration: `<n>s`, `<n>m` or `<n>h` (e.g. `90s`, `10m`, `1h`). Unattended runs may legitimately take hours and the timeout is destructive (abort + drop, no retry), so the default errs long — tighten per task via `timeout:`. The run is killed when exceeded and the target chat receives a timeout notice. An invalid value is listed as an error and the default is used. |
 | `silence` | no | `10m` | Silence window before a probe is sent into the run: same duration syntax as `timeout`. After this many minutes with no observable run activity, the scheduler asks the run whether it is finished (see [A run completes on DONE or ends by timing out](#a-run-completes-on-done-or-ends-by-timing-out)). An invalid value is listed as an error and the default is used. |
 | `enabled` | no | `true` | `false` (case-insensitive) pauses the task without deleting the file. Any other value or absence means enabled. Toggle with `agent-bridge schedule enable|disable <task-name>` or by editing the file. A disabled task never fires — not on schedule and not via `/schedule-run` (it replies "is disabled") — and in-flight runs are unaffected. Re-enabling recomputes the next run from the current clock (no catch-up). |
 | `target` | no | — | Delivery address: the destination chat's clientSessionId. The recommended way to set it initially is `/schedule-here <task-name>` sent in the destination chat; the manual way is to copy the **Chat session ID** line from `/st` in that chat (see [Changing the destination chat](#changing-the-destination-chat)). Required for delivery — without it (or when it fails validation, e.g. a typo or a chat from another channel) the fire is skipped, the skip is logged, and `schedule list` shows `Target: no`. |
@@ -161,7 +161,7 @@ Assistant output no longer ends a run on its own: **a run completes only when th
    ```
 
    Attachments and formatting from every accumulated message still go with the delivery (they are real deliverables). The **full transcript stays in the accumulation file** at `run-outputs/<run-id>.md` (kept after delivery — it is the pointer the suffix references) and is *not* inlined. A last message that is empty or whitespace-only is delivered as the italic one-liner `*Scheduled task "name" finished with no output · full output: <path>*` instead of silence. A marker in an intermediate (non-last) line is *not* a completion signal — the message is accumulated like any other.
-2. **Timeout** — the run exceeds the task's `timeout` (default `10m`): the scheduler aborts that run's session and delivers the italic one-liner `*Scheduled task "name" timed out · full output: <path>*` to the target chat. The partial transcript is **not** inlined — it stays in the kept accumulation file the suffix references.
+2. **Timeout** — the run exceeds the task's `timeout` (default `5h`): the scheduler aborts that run's session and delivers the italic one-liner `*Scheduled task "name" timed out · full output: <path>*` to the target chat. The partial transcript is **not** inlined — it stays in the kept accumulation file the suffix references.
 
 A terminal `error` during the run ends it immediately and delivers the error detail followed by the italic one-liner `*Scheduled task "name" failed · full output: <path>*`. The partial transcript is **not** inlined — it stays in the accumulated file.
 

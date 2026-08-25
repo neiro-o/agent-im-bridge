@@ -15,7 +15,7 @@ const input = vi.fn(async (label: string) => {
     return "daily 09:00";
   }
   if (label === "Working directory (optional, blank = bridge cwd)") return "";
-  if (label === "Timeout (default 10m)") return "10m";
+  if (label === "Timeout (default 5h)") return "5h";
   if (label === "Model (optional, blank = channel default)") return "";
   if (label === "Queue name") return "inbox";
   if (label === "Workers (default 1)") return "1";
@@ -174,8 +174,11 @@ function makeQueueDefinition(overrides: Partial<QueueDefinition> = {}): QueueDef
     name: "inbox",
     channel: "demo",
     workers: 1,
+    silenceMs: 10 * 60_000, // DEFAULT_SILENCE_MS (inlined: this module is vi.mock'ed below)
+    timeoutMs: undefined,
     model: undefined,
     target: undefined,
+    enabled: true,
     body: "",
     filePath: `${TEST_QUEUES_ROOT}/inbox.md`,
     ...overrides,
@@ -207,7 +210,7 @@ function makeLoadedTask(
       scheduleRaw: "daily 09:00",
       schedule: { type: "daily", hour: 9, minute: 0 },
       directory: undefined,
-      timeoutMs: 600_000,
+      timeoutMs: 5 * 3_600_000,
       enabled: true,
       target: undefined,
       prompt: "Do the thing.",
@@ -371,6 +374,7 @@ describe("schedule wizard validators", () => {
 
     // Minimal form (no directory key) and the CLI's blank-directory path (the
     // add wizard passes directory: "") must both parse with zero diagnostics.
+    // An explicit timeout round-trips as-is (10m stays 10m — not the default).
     const minimalVariants: Array<{ schedule: string; timeout: string; directory?: string }> = [
       { schedule: "every 5m", timeout: "10m" },
       { schedule: "every 5m", timeout: "10m", directory: "" },
@@ -421,7 +425,7 @@ describe("runCli schedule add", () => {
       "input:Task name",
       "input:Schedule (examples: every 5m, daily 09:00, weekly mon 09:00, monthly 15 09:00)",
       "input:Working directory (optional, blank = bridge cwd)",
-      "input:Timeout (default 10m)",
+      "input:Timeout (default 5h)",
       "input:Model (optional, blank = channel default)",
     ]);
     expect(loadAllTasks).toHaveBeenCalledWith();
@@ -430,7 +434,7 @@ describe("runCli schedule add", () => {
     const [filePath, content] = writeFile.mock.calls[0] as [string, string, string];
     expect(filePath).toBe("/tmp/schedules/daily-report.md");
     expect(content).toContain("schedule: daily 09:00");
-    expect(content).toContain("timeout: 10m");
+    expect(content).toContain("timeout: 5h");
     expect(content).not.toContain("directory:");
     // Blank model answer writes no model: line.
     expect(content).not.toContain("model:");

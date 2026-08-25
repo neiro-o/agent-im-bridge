@@ -305,8 +305,8 @@ async function addScheduleTask(): Promise<void> {
     // validation only).
     const directory = await ctx.input("Working directory (optional, blank = bridge cwd)");
 
-    const timeout = await ctx.input("Timeout (default 10m)", {
-      defaultValue: "10m",
+    const timeout = await ctx.input("Timeout (default 5h)", {
+      defaultValue: "5h",
       validate: validateTimeoutInput,
     });
 
