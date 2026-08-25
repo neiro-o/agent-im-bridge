@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.8.6](https://github.com/HoPGoldy/agent-bridge/compare/v0.8.5...v0.8.6) (2026-08-25)
+
+
+### Features
+
+* **queue:** configurable per-queue run timeout via `timeout:` front matter ([19a3cc8](https://github.com/HoPGoldy/agent-bridge/commit/19a3cc823eeb0c6684f70c9c8ecb1a8199beab42))
+* **schedule,queue:** raise the default run timeout from 10m to 5h ([ec68972](https://github.com/HoPGoldy/agent-bridge/commit/ec68972f5c2c215eb30ccd1baf993234e64699ca))
+
 ## [0.8.5](https://github.com/HoPGoldy/agent-bridge/compare/v0.8.4...v0.8.5) (2026-08-21)
 
 
