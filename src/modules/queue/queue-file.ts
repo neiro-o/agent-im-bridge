@@ -7,8 +7,10 @@
  * (optional, absent until the queue is bound; written by `/queue-here`),
  * `workers` (integer >= 1, default 1), `timeout` (optional duration like
  * `10m`; default 10m via the controller — the wall-clock limit of this
- * queue's runs), `model` (optional, blank/absent → undefined), `target`
- * (optional, non-empty, written by `/queue-here`) —
+ * queue's runs), `model` (optional, blank/absent → undefined), `directory`
+ * (optional working directory for the queue's runs; a task-level
+ * `directory:` overrides it; validated at fire time, spec D6 style),
+ * `target` (optional, non-empty, written by `/queue-here`) —
  * and its body is the shared context appended to every task prompt. Tasks
  * live in `queues/<name>.tasks/<taskId>.md`; a `taskId` is
  * `<enqueueMs>-<random4>`, so lexicographic file-name order IS the FIFO
@@ -57,8 +59,9 @@ const KNOWN_DEFINITION_KEYS = new Set([
   "model",
   "target",
   "enabled",
+  "directory",
 ]);
-const KNOWN_TASK_KEYS = new Set(["state", "enqueuedAt"]);
+const KNOWN_TASK_KEYS = new Set(["state", "enqueuedAt", "directory"]);
 
 /** A parsed, validated queue definition (spec D1). */
 export interface QueueDefinition {
@@ -90,6 +93,14 @@ export interface QueueDefinition {
   timeoutMs: number | undefined;
   /** Worker model override; absent/blank → the channel agent config's model. */
   model: string | undefined;
+  /**
+   * Queue-level working directory for every run of this queue (parsed like a
+   * scheduled task's `directory:` — spec D6 fire-time validation, the storage
+   * layer never touches the filesystem). Absent/blank → undefined; the
+   * controller falls back to the bridge process cwd. A task-level
+   * `directory:` (the task file's own front matter) overrides this value.
+   */
+  directory: string | undefined;
   /** Delivery address — the destination chat's clientSessionId, written by `/queue-here`. */
   target: string | undefined;
   /**
@@ -115,6 +126,12 @@ export interface QueueTask {
   enqueuedAt: string;
   /** The task prompt (required, non-empty). */
   prompt: string;
+  /**
+   * Task-level working directory override (highest precedence over the queue
+   * definition's `directory:`; written by `queue insert --directory`). Parsed
+   * like a scheduled task's `directory:` — validated at fire time only.
+   */
+  directory: string | undefined;
   /** Absolute path of the task file. */
   filePath: string;
 }
@@ -138,6 +155,8 @@ export interface QueueDefinitionInput {
   name: string;
   workers?: number;
   model?: string;
+  /** Queue-level working directory; blank/absent → the line is not written. */
+  directory?: string;
   body?: string;
 }
 
@@ -249,6 +268,7 @@ export function parseQueueDefinition(
           silenceMs,
           timeoutMs,
           model: nonEmptyString(fields.model),
+          directory: nonEmptyString(fields.directory),
           target: nonEmptyString(fields.target),
           // Only the exact value `false` (case-insensitive) disables; same
           // rule as a scheduled task's `enabled` field.
@@ -310,6 +330,7 @@ export function parseQueueTaskFile(
           state: stateRaw as "pending" | "running",
           enqueuedAt: enqueuedAt as string,
           prompt,
+          directory: nonEmptyString(fields.directory),
           filePath,
         }
       : null;
@@ -409,7 +430,7 @@ export async function writeQueueDefinition(
   input: QueueDefinitionInput,
   queuesRoot: string = QUEUES_DIR,
 ): Promise<WriteQueueDefinitionResult> {
-  const { name, workers = DEFAULT_WORKERS, model, body = "" } = input;
+  const { name, workers = DEFAULT_WORKERS, model, directory, body = "" } = input;
   if (!isValidQueueName(name)) {
     return { ok: false, reason: "invalid queue name" };
   }
@@ -419,6 +440,10 @@ export async function writeQueueDefinition(
   const trimmedModel = model?.trim();
   if (trimmedModel !== undefined && trimmedModel === "") {
     return { ok: false, reason: "model must be a non-empty string when present" };
+  }
+  const trimmedDirectory = directory?.trim();
+  if (trimmedDirectory !== undefined && trimmedDirectory === "") {
+    return { ok: false, reason: "directory must be a non-empty string when present" };
   }
 
   const filePath = getQueueFilePath(name, queuesRoot);
@@ -435,6 +460,9 @@ export async function writeQueueDefinition(
     "---",
     `workers: ${workers}`,
     ...(trimmedModel !== undefined && trimmedModel !== "" ? [`model: ${trimmedModel}`] : []),
+    ...(trimmedDirectory !== undefined && trimmedDirectory !== ""
+      ? [`directory: ${trimmedDirectory}`]
+      : []),
     "---",
   ];
   try {
@@ -458,6 +486,7 @@ export async function insertQueueTask(
   name: string,
   prompt: string,
   queuesRoot: string = QUEUES_DIR,
+  options: { directory?: string } = {},
 ): Promise<string> {
   if (!isValidQueueName(name)) {
     throw new Error(`invalid queue name "${name}"`);
@@ -472,7 +501,10 @@ export async function insertQueueTask(
 
   const { id, enqueuedAt } = generateTaskId();
   const filePath = path.join(getQueueTasksDir(name, queuesRoot), `${id}.md`);
-  const content = `---\nstate: pending\nenqueuedAt: ${enqueuedAt}\n---\n\n${promptText}\n`;
+  // `directory:` is written only when given (blank/undefined → no line), the
+  // same omission convention as the definition's `model:`.
+  const directory = options.directory?.trim();
+  const content = `---\nstate: pending\nenqueuedAt: ${enqueuedAt}\n${directory !== undefined && directory !== "" ? `directory: ${directory}\n` : ""}---\n\n${promptText}\n`;
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFileAtomic(filePath, content);
   return id;

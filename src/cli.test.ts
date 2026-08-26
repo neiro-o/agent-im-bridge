@@ -676,6 +676,7 @@ describe("runCli queue add", () => {
     delete inputOverrides["Queue name"];
     delete inputOverrides["Workers (default 1)"];
     delete inputOverrides["Model (optional, blank = channel default)"];
+    delete inputOverrides["Working directory (optional, blank = bridge cwd)"];
     loadConfig.mockImplementation(async () => CHANNEL_WITH_DEMO);
     mkdir.mockClear();
     writeFile.mockClear();
@@ -695,11 +696,12 @@ describe("runCli queue add", () => {
       logs.restore();
     }
 
-    // No channel step anymore (T1): name, workers, model only.
+    // No channel step anymore (T1): name, workers, model, directory only.
     expect(promptCalls).toEqual([
       "input:Queue name",
       "input:Workers (default 1)",
       "input:Model (optional, blank = channel default)",
+      "input:Working directory (optional, blank = bridge cwd)",
     ]);
     expect(promptCalls.some((call) => call.startsWith("select"))).toBe(false);
     expect(writeFile).toHaveBeenCalledTimes(1);
@@ -710,6 +712,8 @@ describe("runCli queue add", () => {
     expect(content).toContain("workers: 1");
     // Blank model answer writes no model: line.
     expect(content).not.toContain("model:");
+    // Blank directory answer writes no directory: line.
+    expect(content).not.toContain("directory:");
     // Atomic write commits to the queue file path.
     expect(rename).toHaveBeenCalledWith(expect.any(String), "/tmp/queues-test/inbox.md");
     const out = logs.lines.join("\n");
@@ -746,6 +750,19 @@ describe("runCli queue add", () => {
     const [, content] = writeFile.mock.calls[0] as [string, string, string];
     expect(content).toContain("model: azure-openai-responses/gpt-5.6-terra");
     expect(content).not.toContain("channel:");
+  });
+
+  it("writes a directory: line when a working directory is answered", async () => {
+    inputOverrides["Working directory (optional, blank = bridge cwd)"] = " /data/work ";
+    const { runCli } = await import("./cli");
+    try {
+      await runCli(["node", "agent-bridge", "queue", "add"]);
+    } finally {
+      // no-op; logs not needed here
+    }
+
+    const [, content] = writeFile.mock.calls[0] as [string, string, string];
+    expect(content).toContain("directory: /data/work");
   });
 
   it("creates a queue even when no channels are configured (no channel step anymore)", async () => {
@@ -787,10 +804,35 @@ describe("runCli queue insert", () => {
       logs.restore();
     }
 
-    expect(insertQueueTask).toHaveBeenCalledWith("inbox", "Do the thing.");
+    expect(insertQueueTask).toHaveBeenCalledWith("inbox", "Do the thing.", undefined, {});
     const out = logs.lines.join("\n");
     expect(out).toContain('Inserted task 1750000000000-abcd into queue "inbox".');
     expect(out).not.toContain("no target yet");
+  });
+
+  it("passes --directory through as the task-level override", async () => {
+    loadQueueDefinition.mockResolvedValue(makeQueueDefinition({ target: "chat:123" }));
+    const { runCli } = await import("./cli");
+    const logs = captureLogs();
+    try {
+      await runCli([
+        "node",
+        "agent-bridge",
+        "queue",
+        "insert",
+        "inbox",
+        "--prompt",
+        "Do the thing.",
+        "--directory",
+        "/data/work",
+      ]);
+    } finally {
+      logs.restore();
+    }
+
+    expect(insertQueueTask).toHaveBeenCalledWith("inbox", "Do the thing.", undefined, {
+      directory: "/data/work",
+    });
   });
 
   it("prints a warning when the queue has no target", async () => {
@@ -811,7 +853,7 @@ describe("runCli queue insert", () => {
       logs.restore();
     }
 
-    expect(insertQueueTask).toHaveBeenCalledWith("inbox", "Do the thing.");
+    expect(insertQueueTask).toHaveBeenCalledWith("inbox", "Do the thing.", undefined, {});
     expect(logs.lines.join("\n")).toContain("Warning: the queue has no target yet");
   });
 

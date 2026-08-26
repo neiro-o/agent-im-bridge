@@ -33,6 +33,7 @@ workers: 2                 # max concurrent tasks; integer >= 1, default 1
 silence: 10m               # optional; silence window before a probe (same syntax as timeout, default 10m)
 timeout: 1h                # optional; wall-clock run limit (same syntax and 5h default as scheduled tasks)
 model: provider/model-id   # optional; blank/absent = channel default model
+directory: ~/project/foo   # optional; working directory for the queue's runs (fire-time validated; a task-level `directory:` overrides it)
 target: chat:xxx           # delivery address; written by /queue-here
 enabled: true              # optional; `false` = persistent disable switch
 ---
@@ -46,6 +47,7 @@ Shared context appended to every task prompt of this queue.
 ---
 state: pending             # pending | running
 enqueuedAt: 2026-08-19T08:00:00.000Z
+directory: /srv/work       # optional; task-level working directory (overrides the queue's `directory:`)
 ---
 
 The task prompt.
@@ -71,8 +73,13 @@ ownership rule as the scheduler).
 - **Unbound queue** (empty `target`): never consumed; tasks pile up until
   `/queue-here` binds a chat, then the backlog drains automatically.
 - **Fire**: register a run under the synthetic client session id
-  `queue:<queueName>:<taskId>`; `dispatchClientEvent` a `session.new`
-  (carrying `model` when the queue pins one), check the `IngressResult`;
+  `queue:<queueName>:<taskId>`; resolve the working directory (task
+  `directory:` > queue `directory:` > bridge process cwd — both levels are
+  validated at fire time, scheduler-D6 style: an invalid queue-level value
+  stalls the queue's non-override tasks with a warn log, an invalid
+  task-level value drops just that task with a `❌ Queue "<queue>" task
+  could not start: <detail>` notice); `dispatchClientEvent` a `session.new`
+  (carrying the canonical directory and `model` when the queue pins one), check the `IngressResult`;
   on `ok` dispatch `user.message` with `<queue body>\n\n<task prompt>\n\n<completion-protocol block>` (the body is empty when blank; the fixed protocol block is the T4 DONE-marker instruction).
   A run carries a timeout timer set from the queue's `timeout` front matter
   (same duration syntax and 5-hour default as scheduled tasks) and a
@@ -129,12 +136,13 @@ Chat sessions and `schedule:*` behavior are unchanged.
 **CLI** (i18n, same patterns as `schedule add/list`):
 
 - `agent-bridge queue add` — wizard: queue name (unique; invalid/existing
-  name re-asked), channel select, workers (default 1), model (optional,
-  blank = channel default). Writes `queues/<name>.md` with an empty body
+  name re-asked), workers (default 1), model (optional,
+  blank = channel default), working directory (optional, blank = bridge
+  process cwd). Writes `queues/<name>.md` with an empty body
   (the body is the shared context, set by editing the file). Success message
   points to editing the file for the shared context, `/queue-here` and
   `queue insert`.
-- `agent-bridge queue insert <name> --prompt "..."` — validates the queue
+- `agent-bridge queue insert <name> --prompt "..." [--directory <path>]` — validates the queue
   exists, appends a task file. If the queue has no `target`, prints a
   warning that tasks wait until `/queue-here` binds a chat (decided).
   Insert always succeeds regardless of binding or whether the channel is

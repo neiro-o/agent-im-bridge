@@ -18,7 +18,8 @@ Like scheduled tasks, a queue run is **isolated**: it never touches the target c
 
    - a queue name (lowercase letters, digits and hyphens only, e.g. `build-report`; invalid or already-taken names are re-asked),
    - a worker count (default `1` — how many tasks may run at the same time),
-   - an optional model (blank = the channel agent config's default model; it is not validated — the CLI can't reach provider model lists, so an invalid value only surfaces when a task runs, see [How a task runs](#how-a-task-runs)).
+   - an optional model (blank = the channel agent config's default model; it is not validated — the CLI can't reach provider model lists, so an invalid value only surfaces when a task runs, see [How a task runs](#how-a-task-runs)),
+   - an optional working directory (blank = the bridge process cwd; written as the definition's `directory:` — validated at fire time, not here; see [Fields](#fields)).
 
    There is **no channel step** — a queue is created unbound and ownerless. The channel is only assigned later, when `/queue-here` binds a chat.
 
@@ -69,6 +70,7 @@ workers: 2                 # max concurrent tasks; integer >= 1, default 1
 silence: 10m               # optional; silence window before a probe (same syntax as timeout, default 10m)
 timeout: 1h                # optional; wall-clock run limit (same syntax and 5h default as scheduled tasks)
 model: azure-openai-responses/gpt-5.6-terra   # optional; blank/absent = channel default model
+directory: ~/project/my-repo  # optional; working directory for every run (a task-level `directory:` overrides it)
 channel: feishu-dev        # owning channel; ABSENT until /queue-here writes it
 target: feishu:dm:oc_6f9d408e630098e6dd06bb071d6b60fc   # written by /queue-here
 enabled: true              # optional; `false` disables the queue (see below)
@@ -89,10 +91,11 @@ You are the release bot. Always answer in one short paragraph.
 | `silence` | no | `10m` | Silence window before a probe is sent into a run: same duration syntax as `timeout`. After this many minutes with no observable run activity, the controller asks the run whether it is finished (see [Completion](#completion)). An invalid value fails validation and the queue is skipped with a log. |
 | `timeout` | no | `5h` | Max wall-clock duration of a run (`90s` / `10m` / `1h`): same duration syntax and 5-hour default as a scheduled task's `timeout`. Unattended runs may legitimately take hours and the timeout is destructive (abort + drop, no retry), so the default errs long. The value is captured when a task fires, so an edit affects runs fired after the edit, not in-flight ones. An invalid value fails validation and the queue is skipped with a log. |
 | `model` | no | — | Optional per-queue agent model override for every run of the queue (same override plumbing as scheduled tasks' per-task model). Blank or absent = the channel agent config's model. Parsing only checks for a non-empty string; validity is enforced at fire time — an invalid model fails the session creation, which fails the task (see [Failure: fail-and-drop](#failure-fail-and-drop)). |
+| `directory` | no | bridge process cwd | Working directory for every run of the queue (`~` and relative paths are resolved at fire time; same semantics as a scheduled task's `directory`). A task-level `directory:` (see [Task files](#task-files)) overrides it per task. Validated at fire time: an invalid value stalls the queue's non-override tasks (they stay pending, warn log only — like an unbound queue) until the file is fixed; override tasks still fire. |
 | `target` | no | — | Delivery address: the destination chat's clientSessionId, written by `/queue-here <name>` sent in that chat. Without it the queue is never consumed — tasks pile up until a chat is bound. |
 | `enabled` | no | `true` | `false` (case-insensitive) disables the queue: the controller never consumes it — pending tasks pile up untouched (in-flight runs are unaffected and finish normally). Any other value or absence means enabled. Re-enabling drains the backlog automatically on the next tick. Toggle with `agent-bridge queue enable|disable <queue-name>` or by editing the file. |
 
-`queue add` writes the front matter with `workers` (default `1`) and `model` (only if you entered a non-empty one), plus an empty body — **no `channel`, no `target`, no `enabled`**: a fresh queue is unbound and ownerless until `/queue-here` writes both lines in one atomic edit. It does not offer `silence`/`timeout` prompts — those fields are set (and tuned) by editing the file, defaulting to `10m`.
+`queue add` writes the front matter with `workers` (default `1`), `model` (only if you entered a non-empty one) and `directory` (only if you entered one), plus an empty body — **no `channel`, no `target`, no `enabled`**: a fresh queue is unbound and ownerless until `/queue-here` writes both lines in one atomic edit. It does not offer `silence`/`timeout` prompts — those fields are set (and tuned) by editing the file, defaulting to `10m`.
 
 ## Task files
 
@@ -102,21 +105,22 @@ A task is one Markdown file per prompt:
 ---
 state: pending             # pending | running
 enqueuedAt: 2026-08-19T08:00:00.000Z
+directory: ~/project/other-repo   # optional; overrides the queue's `directory:` for this task
 ---
 
 The task prompt.
 ```
 
 - The task id (the file name without `.md`) is `<enqueueMs>-<random4>` — a monotonic millisecond timestamp plus four random hex digits, e.g. `1755658800000-3f2a`. Because the id's prefix is monotonic, **lexicographic file-name order is the FIFO order**.
-- `queue insert` writes `state: pending`; the controller flips it to `running` when it starts the task and deletes the file when the task completes, fails, or times out.
+- `queue insert` writes `state: pending` (and `directory:` when `--directory <path>` is given); the controller flips it to `running` when it starts the task and deletes the file when the task completes, fails, or times out.
 - Tasks are plain files, so external programs can enqueue by writing a file with the same shape, and management (clear, reorder) is done by editing files with AI. To remove a whole queue (definition **and** its pending tasks), use `agent-bridge queue remove <queue-name>`.
 
 ## CLI
 
 | Command | What it does |
 | --- | --- |
-| `agent-bridge queue add` | Interactive wizard: queue name (slug-validated and globally unique), workers (default `1`), optional model — **no channel step**. Writes `queues/<name>.md` (without `channel`/`target`) and prints the file path, the `/queue-here` targeting instruction, and the `queue insert` usage. |
-| `agent-bridge queue insert <queue-name> --prompt "..."` | Validates the queue exists and appends a task file (`queues/<queue-name>.tasks/<id>.md`). Prints `Inserted task <id> into queue "<name>".` If the queue has no `target`, prints a warning that tasks wait until `/queue-here` binds a chat. Insert always succeeds regardless of binding or whether the channel is running — the task is durable the moment the file lands. |
+| `agent-bridge queue add` | Interactive wizard: queue name (slug-validated and globally unique), workers (default `1`), optional model, optional working directory — **no channel step**. Writes `queues/<name>.md` (without `channel`/`target`) and prints the file path, the `/queue-here` targeting instruction, and the `queue insert` usage. |
+| `agent-bridge queue insert <queue-name> --prompt "..."` | Validates the queue exists and appends a task file (`queues/<queue-name>.tasks/<id>.md`). `--directory <path>` sets a task-level working directory that overrides the queue's `directory:` for this task (validated at fire time, not here). Prints `Inserted task <id> into queue "<name>".` If the queue has no `target`, prints a warning that tasks wait until `/queue-here` binds a chat. Insert always succeeds regardless of binding or whether the channel is running — the task is durable the moment the file lands. |
 | `agent-bridge queue list` | Table of every queue: Name, Channel, Workers, Model, Enabled (`yes`/`no`), Bound (`yes`/`no`), Pending count, Running count. |
 | `agent-bridge queue enable <queue-name>` | Set `enabled: true` in the queue file (atomic single-line edit). Consumption resumes on the next tick and the pending backlog drains automatically. Errors on an unknown queue or an invalid name. |
 | `agent-bridge queue disable <queue-name>` | Set `enabled: false` — the controller stops consuming the queue; pending tasks pile up untouched and in-flight runs are unaffected. Errors on an unknown queue or an invalid name. |
@@ -148,7 +152,7 @@ A bound queue cannot be rebound with `/queue-here`. To move it to another chat, 
 The per-channel queue controller runs next to the scheduler and only consumes queues whose `channel` matches its channel. Each task runs in a **fresh, fully isolated agent session**:
 
 1. On its tick the controller reloads the queue definitions and, for every bound queue (`target` set), computes **capacity = workers − inFlight**, takes the oldest `pending` tasks up to that capacity, marks them `running`, and fires each.
-2. **Fire** injects two synthetic events through the same ingress path ordinary chat messages use: a `command.session.new` with the bridge process's working directory and the queue's pinned `model` (when it has one) — the override rides the same event into the agent-session creation, so only this queue's runs use it — followed by a `user.message` whose text is `<queue body>\n\n<task prompt>` (the bare prompt when the body is empty), wrapped with the fixed completion-protocol instruction block. Both carry a synthetic, run-unique client session id of the form `queue:<queue-name>:<task-id>`.
+2. **Fire** injects two synthetic events through the same ingress path ordinary chat messages use: a `command.session.new` whose working directory resolves task `directory:` → queue `directory:` → bridge process cwd (validated at fire time; the canonical path is sent) and the queue's pinned `model` (when it has one) — the override rides the same event into the agent-session creation, so only this queue's runs use it — followed by a `user.message` whose text is `<queue body>\n\n<task prompt>` (the bare prompt when the body is empty), wrapped with the fixed completion-protocol instruction block. Both carry a synthetic, run-unique client session id of the form `queue:<queue-name>:<task-id>`.
 3. Each run carries a timeout timer set from the queue's `timeout` front matter (5-hour default, same as scheduled tasks) and a silence probe (`silence` front matter, default `10m`). A run ends by completing, failing, or timing out.
 
 ### Completion
@@ -171,7 +175,9 @@ The task file is then deleted and the run ends. Attachments and formatting from 
 
 ### Failure: fail-and-drop
 
-A task fails for exactly one of three reasons, and in every case the task file is deleted and the run ends — **no retry, no head-of-line blocking**. To re-run a failed task, insert it again.
+A task fails for exactly one of four reasons, and in every case the task file is deleted and the run ends — **no retry, no head-of-line blocking**. To re-run a failed task, insert it again.
+
+- **Invalid task-level `directory:`** — the task file's own `directory:` fails validation at fire time (e.g. the path does not exist). The task is dropped before anything is dispatched: the target chat receives `❌ Queue "<name>" task could not start: <detail>`, the task file is deleted, and no run is registered (no transcript, no history line). The rest of the queue is unaffected. (An invalid queue-level `directory:` is different: it is a configuration error, so tasks without their own `directory:` simply stay pending with a warn log until the definition is fixed — see [Fields](#fields).)
 
 - **Session-creation failure** — the synthetic `session.new` (or the follow-up `user.message`) reports a failure, e.g. an invalid/unavailable `model`. The run ends immediately, the target chat receives the real reason followed by the italic one-liner (e.g. `<the adapter's error detail>
 

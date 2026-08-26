@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -120,7 +120,7 @@ async function createHarness(
 async function seedQueue(
   root: string,
   name: string,
-  options: { channel?: string; workers?: number; model?: string; target?: string; body?: string; silence?: string; timeout?: string },
+  options: { channel?: string; workers?: number; model?: string; target?: string; body?: string; silence?: string; timeout?: string; directory?: string },
   prompts: string[],
 ): Promise<string[]> {
   // `queue add` no longer writes `channel` (T1): an owned queue must have a
@@ -135,6 +135,7 @@ async function seedQueue(
     ...(options.model !== undefined ? [`model: ${options.model}`] : []),
     ...(options.silence !== undefined ? [`silence: ${options.silence}`] : []),
     ...(options.timeout !== undefined ? [`timeout: ${options.timeout}`] : []),
+    ...(options.directory !== undefined ? [`directory: ${options.directory}`] : []),
     ...(options.target !== undefined ? [`target: ${options.target}`] : []),
     "---",
     "",
@@ -257,6 +258,133 @@ describe("fire (D2)", () => {
       clientSessionId: `queue:q:${id}`,
       text: buildTaskPrompt("", "task a"),
     });
+  });
+});
+
+describe("working directory (task > queue > bridge cwd)", () => {
+  it("uses the queue definition's directory, validated to its canonical path", async () => {
+    const h = await createHarness();
+    const workdir = path.join(h.root, "workspace");
+    await mkdir(workdir);
+    const [id] = await seedQueue(h.root, "q", { target: TARGET, directory: workdir }, ["task a"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    expect(h.dispatched[0]).toEqual({
+      type: "command.session.new",
+      clientSessionId: `queue:q:${id}`,
+      workingDirectory: await realpath(workdir),
+      workingDirectorySource: "default",
+    });
+  });
+
+  it("a task-level directory overrides the queue-level one", async () => {
+    const h = await createHarness();
+    const queueDir = path.join(h.root, "queue-ws");
+    const taskDir = path.join(h.root, "task-ws");
+    await mkdir(queueDir);
+    await mkdir(taskDir);
+    await seedQueue(h.root, "q", { target: TARGET, directory: queueDir }, []);
+    const id = await insertQueueTask("q", "task a", h.root, { directory: taskDir });
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    expect(h.dispatched[0]).toMatchObject({
+      type: "command.session.new",
+      clientSessionId: `queue:q:${id}`,
+      workingDirectory: await realpath(taskDir),
+    });
+  });
+
+  it("falls back to the bridge process cwd when neither level sets a directory", async () => {
+    const h = await createHarness();
+    const [id] = await seedQueue(h.root, "q", { target: TARGET }, ["task a"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    expect(h.dispatched[0]).toMatchObject({
+      type: "command.session.new",
+      clientSessionId: `queue:q:${id}`,
+      workingDirectory: process.cwd(),
+    });
+  });
+
+  it("drops a task whose task-level directory is invalid, notifying the target", async () => {
+    const h = await createHarness();
+    await seedQueue(h.root, "q", { target: TARGET }, []);
+    const id = await insertQueueTask("q", "task a", h.root, {
+      directory: path.join(h.root, "missing"),
+    });
+    await h.controller.start();
+    await waitFor(() => expect(h.delivered).toHaveLength(1));
+
+    // Nothing was dispatched, the task file is gone (fail-and-drop), and the
+    // target got the fire error with the validation detail.
+    expect(h.dispatched).toHaveLength(0);
+    expect(h.delivered[0]).toMatchObject({ type: "assistant.message", clientSessionId: TARGET });
+    const text = (h.delivered[0] as { text?: string }).text ?? "";
+    expect(text).toContain('Queue "q" task could not start');
+    expect(text).toContain("no such file or directory");
+    const tasks = await listQueueTasks("q", h.root);
+    expect(tasks.some((t) => t.id === id)).toBe(false);
+    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("invalid working directory"));
+    // Pre-registration failure: no run record, no history line.
+    expect(await history(h)).toEqual([]);
+  });
+
+  it("a stalled head task does not hold the capacity slot of a younger override task (workers: 1)", async () => {
+    // Head-of-line check: with workers=1 and the queue directory broken, the
+    // older non-override task stalls, but the younger task carrying its own
+    // `directory:` is still eligible for the capacity slice and fires.
+    const h = await createHarness();
+    const taskDir = path.join(h.root, "task-ws");
+    await mkdir(taskDir);
+    await seedQueue(
+      h.root,
+      "q",
+      { target: TARGET, workers: 1, directory: path.join(h.root, "missing") },
+      ["stalled head"],
+    );
+    const overrideId = await insertQueueTask("q", "override task", h.root, { directory: taskDir });
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    expect(h.dispatched[0]).toMatchObject({
+      type: "command.session.new",
+      clientSessionId: `queue:q:${overrideId}`,
+      workingDirectory: await realpath(taskDir),
+    });
+    const tasks = await listQueueTasks("q", h.root);
+    expect(tasks.find((t) => t.id !== overrideId)?.state).toBe("pending");
+    expect(h.delivered).toHaveLength(0);
+  });
+
+  it("an invalid queue-level directory stalls non-override tasks but override tasks still fire", async () => {
+    const h = await createHarness();
+    const taskDir = path.join(h.root, "task-ws");
+    await mkdir(taskDir);
+    await seedQueue(
+      h.root,
+      "q",
+      { target: TARGET, workers: 2, directory: path.join(h.root, "missing") },
+      ["plain task"],
+    );
+    const overrideId = await insertQueueTask("q", "override task", h.root, { directory: taskDir });
+    await h.controller.start();
+    // Only the override task fires (session.new + user.message).
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    expect(h.dispatched[0]).toMatchObject({
+      type: "command.session.new",
+      clientSessionId: `queue:q:${overrideId}`,
+      workingDirectory: await realpath(taskDir),
+    });
+    // The non-override task stays pending (pile-up-until-fixed), silently:
+    // the stall is log-only, no target notification.
+    const tasks = await listQueueTasks("q", h.root);
+    expect(tasks.find((t) => t.id !== overrideId)?.state).toBe("pending");
+    expect(h.delivered).toHaveLength(0);
+    expect(h.logger.warn).toHaveBeenCalledWith(expect.stringContaining("invalid working directory"));
   });
 });
 

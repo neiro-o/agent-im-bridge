@@ -493,6 +493,11 @@ async function addQueue(): Promise<void> {
       placeholder: "Example: azure-openai-responses/gpt-5.6-terra",
     });
 
+    // Blank = the bridge process cwd. Deliberately not validated against the
+    // filesystem here — the bridge may run elsewhere (spec D6, fire-time
+    // validation only), same convention as `schedule add`.
+    const directory = await ctx.input(t("cli.queueDirectoryPrompt"));
+
     // No `channel` is written: a queue stays ownerless and unbound until
     // `/queue-here` binds a chat (writing both `channel` and `target`).
     const result = await writeQueueDefinition({
@@ -500,6 +505,7 @@ async function addQueue(): Promise<void> {
       workers: Number(workers),
       // Blank = channel default; the storage layer rejects a present-but-blank model.
       model: model.trim() === "" ? undefined : model,
+      directory: directory.trim() === "" ? undefined : directory,
     });
     if (!result.ok) {
       throw new Error(result.reason);
@@ -522,7 +528,7 @@ async function addQueue(): Promise<void> {
  */
 async function insertQueueCommand(
   queueName: string,
-  options: { prompt?: string },
+  options: { prompt?: string; directory?: string },
 ): Promise<void> {
   const t = getTranslatorForCommon();
   if (options.prompt === undefined || options.prompt.trim() === "") {
@@ -534,7 +540,13 @@ async function insertQueueCommand(
     throw new Error(t("cli.queueNotFound", { name: queueName }));
   }
 
-  const taskId = await insertQueueTask(queueName, options.prompt);
+  // `--directory` lands in the task front matter as-is (fire-time validation
+  // only, spec D6 — the bridge may run elsewhere); a blank value is treated
+  // as absent (no line written, the queue-level/default resolution applies).
+  const directory = options.directory?.trim();
+  const taskId = await insertQueueTask(queueName, options.prompt, undefined, {
+    ...(directory !== undefined && directory !== "" ? { directory } : {}),
+  });
   console.log(t("cli.queueInserted", { name: queueName, taskId }));
 
   if (definition.target === undefined) {
@@ -851,7 +863,8 @@ export async function runCli(argv = process.argv): Promise<void> {
     .description("Insert a task into a queue")
     .argument("<queue-name>")
     .option("--prompt <prompt>", "Task prompt")
-    .action(async (queueName: string, options: { prompt?: string }) => {
+    .option("--directory <path>", "Working directory for this task (overrides the queue's directory)")
+    .action(async (queueName: string, options: { prompt?: string; directory?: string }) => {
       await insertQueueCommand(queueName, options);
     });
 

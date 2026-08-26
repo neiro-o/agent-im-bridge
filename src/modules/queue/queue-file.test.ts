@@ -201,6 +201,28 @@ Body.
     expect(definition).toBeNull();
   });
 
+  it("parses the optional directory as a plain string, absent or blank by default", () => {
+    const { definition, errors } = parseQueueDefinition(
+      "with-dir.md",
+      "---\nchannel: feishu-dev\ndirectory: ~/project/foo\n---\nBody.\n",
+    );
+    expect(errors).toEqual([]);
+    expect(definition?.directory).toBe("~/project/foo");
+
+    for (const raw of ["directory:", "directory:  ", 'directory: ""']) {
+      const blank = parseQueueDefinition(
+        "blank-dir.md",
+        `---\nchannel: feishu-dev\n${raw}\n---\nBody.\n`,
+      );
+      expect(blank.errors).toEqual([]);
+      expect(blank.definition?.directory).toBeUndefined();
+    }
+
+    const absent = parseQueueDefinition("no-dir.md", "---\nchannel: feishu-dev\n---\nBody.\n");
+    expect(absent.errors).toEqual([]);
+    expect(absent.definition?.directory).toBeUndefined();
+  });
+
   it("treats a blank silence as unset (defaults to 10m)", () => {
     for (const raw of ["silence:", "silence:  ", 'silence: ""']) {
       const { definition, errors } = parseQueueDefinition(
@@ -276,6 +298,30 @@ Run the migration.
       prompt: "Run the migration.",
       filePath: "",
     });
+  });
+
+  it("parses the optional task-level directory override", () => {
+    const { task, errors, warnings } = parseQueueTaskFile(
+      "1724000000000-ab12.md",
+      "---\nstate: pending\nenqueuedAt: 2026-08-19T08:00:00.000Z\ndirectory: /srv/work\n---\nGo.\n",
+    );
+    expect(errors).toEqual([]);
+    expect(warnings).toEqual([]);
+    expect(task?.directory).toBe("/srv/work");
+
+    const blank = parseQueueTaskFile(
+      "1724000000001-cd34.md",
+      "---\nstate: pending\nenqueuedAt: 2026-08-19T08:00:00.000Z\ndirectory:\n---\nGo.\n",
+    );
+    expect(blank.errors).toEqual([]);
+    expect(blank.task?.directory).toBeUndefined();
+
+    const absent = parseQueueTaskFile(
+      "1724000000002-ef56.md",
+      "---\nstate: pending\nenqueuedAt: 2026-08-19T08:00:00.000Z\n---\nGo.\n",
+    );
+    expect(absent.errors).toEqual([]);
+    expect(absent.task?.directory).toBeUndefined();
   });
 
   it("accepts the running state and quoted values", () => {
@@ -565,6 +611,29 @@ describe("writeQueueDefinition", () => {
       ok: false,
       reason: "model must be a non-empty string when present",
     });
+    expect(await writeQueueDefinition({ name: "ops", directory: "  " }, root)).toEqual({
+      ok: false,
+      reason: "directory must be a non-empty string when present",
+    });
+  });
+
+  it("writes the directory line only when provided", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agent-bridge-queues-"));
+    tmpDirs.push(root);
+    const withDir = await writeQueueDefinition(
+      { name: "with-dir", directory: " ~/project/foo " },
+      root,
+    );
+    expect(withDir.ok).toBe(true);
+    const content = await readFile(path.join(root, "with-dir.md"), "utf8");
+    expect(content).toContain("directory: ~/project/foo");
+    const definition = await loadQueueDefinition("with-dir", root);
+    expect(definition?.directory).toBe("~/project/foo");
+
+    const noDir = await writeQueueDefinition({ name: "no-dir" }, root);
+    expect(noDir.ok).toBe(true);
+    const noDirContent = await readFile(path.join(root, "no-dir.md"), "utf8");
+    expect(noDirContent).not.toContain("directory:");
   });
 });
 
@@ -603,6 +672,29 @@ describe("insertQueueTask / listQueueTasks", () => {
       `---\nstate: pending\nenqueuedAt: ${tasks[0].enqueuedAt}\n---\n\nRun the migration.\n`,
     );
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("writes a task-level directory line only when the option is given", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "agent-bridge-queues-"));
+    tmpDirs.push(root);
+    await writeQueueDefinition({ name: "ops" }, root);
+
+    const withDir = await insertQueueTask("ops", "With dir.", root, { directory: " /srv/work " });
+    const withDirContent = await readFile(path.join(root, "ops.tasks", `${withDir}.md`), "utf8");
+    expect(withDirContent).toContain("directory: /srv/work");
+    const withDirTasks = await listQueueTasks("ops", root);
+    expect(withDirTasks[0].directory).toBe("/srv/work");
+
+    const noDir = await insertQueueTask("ops", "No dir.", root);
+    const noDirContent = await readFile(path.join(root, "ops.tasks", `${noDir}.md`), "utf8");
+    expect(noDirContent).not.toContain("directory:");
+    const tasks = await listQueueTasks("ops", root);
+    expect(tasks.find((t) => t.id === noDir)?.directory).toBeUndefined();
+
+    // Blank option behaves like absent (no line written).
+    const blankDir = await insertQueueTask("ops", "Blank dir.", root, { directory: "  " });
+    const blankContent = await readFile(path.join(root, "ops.tasks", `${blankDir}.md`), "utf8");
+    expect(blankContent).not.toContain("directory:");
   });
 
   it("inserts tasks with distinct, monotonic ids and lists them in FIFO order", async () => {
@@ -712,6 +804,27 @@ describe("setQueueTaskState / deleteQueueTask", () => {
     expect(back.state).toBe("pending");
     expect(back.prompt).toBe(before.prompt);
     expect(back.enqueuedAt).toBe(before.enqueuedAt);
+  });
+
+  it("preserves a task-level directory across pending -> running flips", async () => {
+    // Regression pin: the task-level `directory:` override only matters if it
+    // survives the fire-time `running` flip (and the restart re-enqueue flip).
+    const root = await mkdtemp(path.join(os.tmpdir(), "agent-bridge-queues-"));
+    tmpDirs.push(root);
+    await writeQueueDefinition({ name: "ops" }, root);
+    const taskId = await insertQueueTask("ops", "Run the migration.", root, {
+      directory: "/srv/work",
+    });
+
+    await setQueueTaskState("ops", taskId, "running", root);
+    const running = (await listQueueTasks("ops", root))[0];
+    expect(running.state).toBe("running");
+    expect(running.directory).toBe("/srv/work");
+
+    await setQueueTaskState("ops", taskId, "pending", root);
+    const back = (await listQueueTasks("ops", root))[0];
+    expect(back.state).toBe("pending");
+    expect(back.directory).toBe("/srv/work");
   });
 
   it("changes only the state line in the file, byte-for-byte elsewhere", async () => {

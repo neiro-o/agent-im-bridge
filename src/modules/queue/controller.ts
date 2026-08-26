@@ -36,6 +36,7 @@ import type { Translator } from "../../i18n";
 import { createLogger, type Logger } from "../../core/logger";
 import { appendRunHistory, type RunHistoryOutcome } from "../run-completion/history";
 import { DEFAULT_TIMEOUT_MS } from "../schedule/task-file";
+import { validateWorkingDirectory } from "../client/utils/working-directory";
 import {
   buildProbeMessage,
   buildTaskPrompt,
@@ -287,27 +288,100 @@ export class QueueController {
         this.#logger.error(`[queue] failed to load tasks of queue "${definition.name}":`, error);
         continue;
       }
-      // Oldest `pending` tasks up to capacity (lexicographic file order IS
-      // the FIFO order, spec D1).
-      const pending = tasks.filter((task) => task.state === "pending").slice(0, capacity);
+      const pendingAll = tasks.filter((task) => task.state === "pending");
+      if (pendingAll.length === 0) continue;
+
+      // Fire-time working-directory validation (scheduler spec D6 style): the
+      // queue-level `directory:` is validated once per tick, only when there
+      // is work to fire. An invalid value is a configuration error — tasks
+      // without their own `directory:` override stay pending with a warn log
+      // (same "pile up until fixed" semantics as an unbound/disabled queue),
+      // while override tasks are unaffected: they are validated individually
+      // in #fire and stay eligible for the capacity slice below.
+      let queueDirectory: string | undefined;
+      let queueDirectoryInvalid = false;
+      if (definition.directory !== undefined) {
+        const validation = await validateWorkingDirectory(definition.directory);
+        if (validation.ok) {
+          queueDirectory = validation.directory;
+        } else {
+          queueDirectoryInvalid = true;
+          this.#logger.warn(
+            `[queue] queue "${definition.name}" has an invalid working directory "${validation.directory}": ${validation.detail}; tasks without their own directory stay pending`,
+          );
+        }
+      }
+
+      // Oldest pending tasks up to capacity (lexicographic file order IS the
+      // FIFO order, spec D1). Stalled tasks (broken queue-level directory, no
+      // override) are filtered BEFORE the capacity slice: they cannot run
+      // until the definition is fixed, so they must not hold slots that
+      // runnable override tasks could use.
+      const pending = pendingAll
+        .filter((task) => !(queueDirectoryInvalid && task.directory === undefined))
+        .slice(0, capacity);
       for (const task of pending) {
         if (!this.#started) return;
-        await this.#fire(definition, task);
+        await this.#fire(definition, task, queueDirectory);
       }
     }
   }
 
   /**
-   * Fires one task (spec D2): marks it `running`, registers the run with its
-   * timeout timer BEFORE dispatching (the run id must exist before any
-   * output can arrive), then dispatches `command.session.new` (carrying the
-   * queue's pinned `model` when it has one) and checks the ingress result —
+   * Fires one task (spec D2): resolves the working directory (task
+   * `directory:` > queue `directory:` > bridge process cwd — the queue-level
+   * value arrives already validated/canonical from #tick; an invalid
+   * task-level override fails just this task, fail-and-drop + notice),
+   * marks the task `running`, registers the run with its timeout timer
+   * BEFORE dispatching (the run id must exist before any output can
+   * arrive), then dispatches `command.session.new` (carrying the queue's
+   * pinned `model` when it has one) and checks the ingress result —
    * a failed session creation stops the fire right there, so the follow-up
    * `user.message` can never auto-create a model-less session (T6). The
    * `user.message` text is `<queue body>\n\n<task prompt>` (body empty →
    * just the prompt).
    */
-  async #fire(definition: QueueDefinition, task: QueueTask): Promise<void> {
+  async #fire(
+    definition: QueueDefinition,
+    task: QueueTask,
+    queueDirectory: string | undefined,
+  ): Promise<void> {
+    const target = definition.target;
+    if (target === undefined) {
+      // Defensive: #tick only fires queues with a target.
+      this.#logger.warn(`[queue] queue "${definition.name}" has no target; skipping task "${task.id}"`);
+      return;
+    }
+
+    // A task-level `directory:` override is validated here, BEFORE the task
+    // is marked running, so an invalid one drops the task cleanly without a
+    // running-state window. No run record or history line exists for this
+    // failure (same as the scheduler's directory-validation failure, which
+    // returns before #registerRun): the notice + log are the trace.
+    let workingDirectory = queueDirectory ?? process.cwd();
+    if (task.directory !== undefined) {
+      const validation = await validateWorkingDirectory(task.directory);
+      if (!validation.ok) {
+        // SF-2 stop-race: a stop() landing during the validation await must
+        // not delete the task or deliver — the task stays pending and the
+        // next start re-fires it (at-least-once), failing and notifying then.
+        // Every other fire-failure path gets this from #failFire's stale-fire
+        // guard; this pre-registration path has no RunRecord to check, so the
+        // #started check is the equivalent.
+        if (!this.#started) return;
+        this.#logger.warn(
+          `[queue] task "${task.id}" of queue "${definition.name}" has an invalid working directory "${validation.directory}": ${validation.detail}`,
+        );
+        await this.#deleteTask(definition.name, task.id);
+        await this.#deliverToTarget(
+          target,
+          this.#t("queue.fireError", { queue: definition.name, detail: validation.detail }),
+        );
+        return;
+      }
+      workingDirectory = validation.directory;
+    }
+
     try {
       await setQueueTaskState(definition.name, task.id, "running", this.#queuesRoot);
     } catch (error) {
@@ -315,12 +389,6 @@ export class QueueController {
         `[queue] failed to mark task "${task.id}" of queue "${definition.name}" as running:`,
         error,
       );
-      return;
-    }
-    const target = definition.target;
-    if (target === undefined) {
-      // Defensive: #tick only fires queues with a target.
-      this.#logger.warn(`[queue] queue "${definition.name}" has no target; skipping task "${task.id}"`);
       return;
     }
 
@@ -337,7 +405,7 @@ export class QueueController {
       const sessionResult = await this.#dispatchClientEvent({
         type: "command.session.new",
         clientSessionId: sessionId,
-        workingDirectory: process.cwd(),
+        workingDirectory,
         workingDirectorySource: "default",
         // Per-queue model override (spec D1): only present when the queue
         // pins one; absent stays undefined so the channel config model
