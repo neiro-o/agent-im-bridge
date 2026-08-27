@@ -27,7 +27,7 @@ type FakeChild = EventEmitter & {
   kill: ReturnType<typeof vi.fn>;
 };
 
-function createFakeChild(): FakeChild {
+function createFakeChild(onCommand?: (command: Record<string, unknown>) => unknown): FakeChild {
   const stdout = new EventEmitter();
   const stderr = new EventEmitter();
   const child = new EventEmitter() as FakeChild;
@@ -39,16 +39,18 @@ function createFakeChild(): FakeChild {
   child.stdin = {
     writable: true,
     write(payload: string, cb?: (error?: Error | null) => void) {
-      const parsed = JSON.parse(payload) as { id?: string; type: string };
+      const parsed = JSON.parse(payload) as Record<string, unknown> & { id?: string; type: string };
+      const customData = onCommand?.(parsed);
       const response = {
         id: parsed.id,
         type: "response",
         command: parsed.type,
         success: true,
         data:
-          parsed.type === "get_state"
+          customData ??
+          (parsed.type === "get_state"
             ? { sessionId: "session-1", sessionName: "agent-1" }
-            : {},
+            : {}),
       };
       setImmediate(() => {
         stdout.emit("data", Buffer.from(`${JSON.stringify(response)}\n`));
@@ -71,6 +73,43 @@ describe("PiRpcClient", () => {
 
   afterEach(async () => {
     await rm(sessionDir, { recursive: true, force: true });
+  });
+
+  it("queries and updates the current thinking level", async () => {
+    const commands: Array<Record<string, unknown>> = [];
+    const client = new PiRpcClient({ agentSessionId: "agent-1", piSessionId: "pi-agent-1", sessionDir });
+    vi.mocked(spawn).mockReturnValue(
+      createFakeChild((command) => {
+        commands.push(command);
+        if (command.type === "get_available_thinking_levels") {
+          return { levels: ["off", "low", "medium", "high"] };
+        }
+        return undefined;
+      }) as never,
+    );
+
+    await client.start();
+    await expect(client.getAvailableThinkingLevels()).resolves.toEqual(["off", "low", "medium", "high"]);
+    await client.setThinkingLevel("high");
+
+    expect(commands).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "get_available_thinking_levels" }),
+        expect.objectContaining({ type: "set_thinking_level", level: "high" }),
+      ]),
+    );
+  });
+
+  it("rejects malformed thinking-level responses", async () => {
+    const client = new PiRpcClient({ agentSessionId: "agent-1", piSessionId: "pi-agent-1", sessionDir });
+    vi.mocked(spawn).mockReturnValue(
+      createFakeChild((command) =>
+        command.type === "get_available_thinking_levels" ? { levels: ["low", 42] } : undefined,
+      ) as never,
+    );
+
+    await client.start();
+    await expect(client.getAvailableThinkingLevels()).rejects.toThrow("Invalid thinking levels");
   });
 
   it("spawns the pi process with the configured cwd", async () => {

@@ -42,6 +42,34 @@ describe("renderStatusMarkdown", () => {
     expect(markdown).toBe("当前模型已切换至 `anthropic/claude-sonnet-4-5`。");
   });
 
+  it("renders effort query and update responses", () => {
+    expect(
+      renderStatusMarkdown(
+        {
+          type: "agent.effort.info",
+          clientSessionId: "client-1",
+          currentLevel: "medium",
+          availableLevels: ["off", "low", "medium", "high"],
+        },
+        getTranslator("en-US"),
+      ),
+    ).toBe([
+      "**Thinking effort**",
+      "",
+      "- Current: `medium`",
+      "- Available: `off` / `low` / `medium` / `high`",
+      "",
+      "Use `/effort <level>` to switch.",
+    ].join("\n"));
+
+    expect(
+      renderStatusMarkdown(
+        { type: "agent.effort.updated", clientSessionId: "client-1", level: "high" },
+        getTranslator("zh-CN"),
+      ),
+    ).toBe("思考等级已切换为 `high`。");
+  });
+
   it("renders localized markdown for agent.status.info", () => {
     const markdown = renderStatusMarkdown(
       {

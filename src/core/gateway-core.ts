@@ -284,6 +284,16 @@ export class GatewayCore {
       return { ok: true };
     }
 
+    if (event.type === "command.session.effort.get") {
+      await this.#handleSessionEffortGet(event.clientSessionId);
+      return { ok: true };
+    }
+
+    if (event.type === "command.session.effort.set") {
+      await this.#handleSessionEffortSet(event.clientSessionId, event.level);
+      return { ok: true };
+    }
+
     // Core-routed `/queue-here <name>` (spec D4): the IM adapters do not
     // parse this command, so an unrecognized slash command arrives here as a
     // plain chat-originated `user.message` — the core recognizes the raw
@@ -604,6 +614,107 @@ export class GatewayCore {
         clientSessionId,
         kind,
         ...(detail ? { detail } : {}),
+      });
+    }
+  }
+
+  async #handleSessionEffortGet(clientSessionId: string): Promise<void> {
+    const runtime = await this.#getActiveRuntime(clientSessionId);
+    if (!runtime) {
+      await this.#deliverClientInput({
+        type: "error",
+        clientSessionId,
+        kind: "agent.effort.unavailable",
+        detail: this.#t("gateway.noActiveSessionForEffort"),
+      });
+      return;
+    }
+
+    this.#touchRuntime(runtime);
+    const { getAvailableThinkingLevels, getStatus } = runtime.agentAdapter;
+    if (!getAvailableThinkingLevels || !getStatus) {
+      await this.#deliverClientInput({
+        type: "error",
+        clientSessionId,
+        kind: "agent.effort.unsupported",
+      });
+      return;
+    }
+
+    try {
+      const [availableLevels, status] = await Promise.all([
+        getAvailableThinkingLevels.call(runtime.agentAdapter),
+        getStatus.call(runtime.agentAdapter),
+      ]);
+      await this.#deliverClientInput({
+        type: "agent.effort.info",
+        clientSessionId,
+        currentLevel: status.thinkingLevel,
+        availableLevels,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.#deliverClientInput({
+        type: "error",
+        clientSessionId,
+        kind: "agent.effort.unavailable",
+        detail,
+      });
+    }
+  }
+
+  async #handleSessionEffortSet(clientSessionId: string, requestedLevel: string): Promise<void> {
+    const runtime = await this.#getActiveRuntime(clientSessionId);
+    if (!runtime) {
+      await this.#deliverClientInput({
+        type: "error",
+        clientSessionId,
+        kind: "agent.effort.unavailable",
+        detail: this.#t("gateway.noActiveSessionForEffort"),
+      });
+      return;
+    }
+
+    this.#touchRuntime(runtime);
+    const { getAvailableThinkingLevels, setThinkingLevel } = runtime.agentAdapter;
+    if (!getAvailableThinkingLevels || !setThinkingLevel) {
+      await this.#deliverClientInput({
+        type: "error",
+        clientSessionId,
+        kind: "agent.effort.unsupported",
+      });
+      return;
+    }
+
+    try {
+      const availableLevels = await getAvailableThinkingLevels.call(runtime.agentAdapter);
+      const requested = requestedLevel.trim().toLowerCase();
+      const level = availableLevels.find((candidate) => candidate.toLowerCase() === requested);
+      if (!level) {
+        await this.#deliverClientInput({
+          type: "error",
+          clientSessionId,
+          kind: "agent.effort.invalid",
+          detail: this.#t("client.effortInvalidDetail", {
+            levels: availableLevels.join(" / ") || this.#t("client.statusUnavailableValue"),
+          }),
+        });
+        return;
+      }
+
+      await setThinkingLevel.call(runtime.agentAdapter, level);
+      await this.#deliverClientInput({
+        type: "agent.effort.updated",
+        clientSessionId,
+        level,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      await this.#deliverClientInput({
+        type: "error",
+        clientSessionId,
+        kind: "agent.effort.unavailable",
+        detail,
       });
     }
   }

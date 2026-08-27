@@ -275,6 +275,20 @@ export class PiCodingAgentAdapter implements AgentAdapter {
       }));
   }
 
+  async setThinkingLevel(level: string): Promise<void> {
+    if (!this.#client) {
+      throw new Error("PiCodingAgentAdapter is not started");
+    }
+    await this.#client.setThinkingLevel(level);
+  }
+
+  async getAvailableThinkingLevels(): Promise<string[]> {
+    if (!this.#client) {
+      throw new Error("PiCodingAgentAdapter is not started");
+    }
+    return this.#client.getAvailableThinkingLevels();
+  }
+
   async setModel(target: string): Promise<{ provider: string; modelId: string }> {
     if (!this.#client) {
       throw new PiModelCommandError("agent.model.set.unavailable", "PiCodingAgentAdapter is not started");

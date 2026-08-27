@@ -52,6 +52,21 @@ export function renderStatusMarkdown(event: ClientInputEvent, t: Translator): st
     return t("client.modelUpdated", { model: `${event.provider}/${event.modelId}` });
   }
 
+  if (event.type === "agent.effort.info") {
+    return [
+      `**${t("client.effortTitle")}**`,
+      "",
+      `- ${t("client.effortCurrent")}: ${event.currentLevel ? `\`${event.currentLevel}\`` : t("client.statusUnavailableValue")}`,
+      `- ${t("client.effortAvailable")}: ${event.availableLevels.length > 0 ? event.availableLevels.map((level) => `\`${level}\``).join(" / ") : t("client.statusUnavailableValue")}`,
+      "",
+      t("client.effortUsage"),
+    ].join("\n");
+  }
+
+  if (event.type === "agent.effort.updated") {
+    return t("client.effortUpdated", { level: event.level });
+  }
+
   if (event.type === "agent.status.info") {
     return [
       `**${t("client.statusTitle")}**`,
@@ -76,6 +91,12 @@ export function renderStatusMarkdown(event: ClientInputEvent, t: Translator): st
         return formatErrorMarkdown(t("client.modelInvalid"), event.detail);
       case "agent.model.busy":
         return event.detail ?? t("client.modelBusy");
+      case "agent.effort.unsupported":
+        return formatErrorMarkdown(t("client.effortUnsupported"), event.detail);
+      case "agent.effort.invalid":
+        return formatErrorMarkdown(t("client.effortInvalid"), event.detail);
+      case "agent.effort.unavailable":
+        return formatErrorMarkdown(t("client.effortUnavailable"), event.detail);
       case "agent.run.failed":
         return formatErrorMarkdown(t("client.agentRunFailed"), event.detail);
       default:

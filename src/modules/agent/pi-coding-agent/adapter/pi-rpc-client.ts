@@ -15,6 +15,8 @@ export type PiRpcCommand =
   | { id?: string; type: "get_session_stats" }
   | { id?: string; type: "get_available_models" }
   | { id?: string; type: "set_model"; provider: string; modelId: string }
+  | { id?: string; type: "get_available_thinking_levels" }
+  | { id?: string; type: "set_thinking_level"; level: string }
   | { id?: string; type: "set_session_name"; name: string };
 
 export type PiRpcResponse = {
@@ -303,6 +305,23 @@ export class PiRpcClient {
   async setModel(provider: string, modelId: string): Promise<{ provider?: string; id?: string }> {
     const response = await this.#send({ type: "set_model", provider, modelId });
     return (response.data as { provider?: string; id?: string } | undefined) ?? {};
+  }
+
+  async getAvailableThinkingLevels(): Promise<string[]> {
+    const response = await this.#send({ type: "get_available_thinking_levels" });
+    const data = response.data;
+    if (!data || typeof data !== "object") {
+      throw new Error("Invalid get_available_thinking_levels response");
+    }
+    const levels = (data as { levels?: unknown }).levels;
+    if (!Array.isArray(levels) || !levels.every((level): level is string => typeof level === "string")) {
+      throw new Error("Invalid thinking levels returned by pi RPC");
+    }
+    return levels;
+  }
+
+  async setThinkingLevel(level: string): Promise<void> {
+    await this.#send({ type: "set_thinking_level", level });
   }
 
   async setSessionName(name: string): Promise<void> {

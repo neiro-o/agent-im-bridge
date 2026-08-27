@@ -19,7 +19,7 @@ const resources = {
       client: {
         processing: "Processing...",
         helpMessage:
-          "Available commands:\n\n- `/new [path]` (`/n [path]`) - Start a new agent session; optionally start it in a specific directory, e.g. `/new /path/to/project`. A directory given once is remembered and reused by later `/new` without a path\n- `/compact` (`/c`) - Compact the current session context\n- `/stop` (`/s`) - Stop the active agent run\n- `/status` (`/st`) - Show the current agent session status\n- `/model` (`/m`) - List available models, or switch with `/model provider/modelId`\n- `/schedule-run <task-name>` - Run a scheduled task once now (the result is sent to the task's target chat)\n- `/schedule-here <task-name>` - Bind this chat as a task's result destination and set the task's owning channel (send this in the chat that should receive the results; an already-bound task must be unbound first)\n- `/queue-here <queue-name>` - Bind this chat as a queue's result destination (send this in the chat that should receive the results; an already-bound queue must be unbound by editing its file with AI)\n- `/help` (`/h`) - Show this help message",
+          "Available commands:\n\n- `/new [path]` (`/n [path]`) - Start a new agent session; optionally start it in a specific directory, e.g. `/new /path/to/project`. A directory given once is remembered and reused by later `/new` without a path\n- `/compact` (`/c`) - Compact the current session context\n- `/stop` (`/s`) - Stop the active agent run\n- `/status` (`/st`) - Show the current agent session status\n- `/model` (`/m`) - List available models, or switch with `/model provider/modelId`\n- `/effort [level]` (`/thinking [level]`) - Show or switch the current model's thinking effort\n- `/schedule-run <task-name>` - Run a scheduled task once now (the result is sent to the task's target chat)\n- `/schedule-here <task-name>` - Bind this chat as a task's result destination and set the task's owning channel (send this in the chat that should receive the results; an already-bound task must be unbound first)\n- `/queue-here <queue-name>` - Bind this chat as a queue's result destination (send this in the chat that should receive the results; an already-bound queue must be unbound by editing its file with AI)\n- `/help` (`/h`) - Show this help message",
         messageDeliveryFailedTitle: "[agent-bridge error] Message delivery failed",
         invalidNewWorkingDirectory:
           "Cannot start a new session: the working directory `{{workingDirectory}}` is invalid ({{detail}}).",
@@ -63,6 +63,15 @@ const resources = {
         modelInvalid: "The requested model is invalid or unavailable.",
         modelBusy: "Current session is busy, so the model cannot be switched. Please use `/stop` first.",
         modelUpdated: "Switched current model to `{{model}}`.",
+        effortTitle: "Thinking effort",
+        effortCurrent: "Current",
+        effortAvailable: "Available",
+        effortUsage: "Use `/effort <level>` to switch.",
+        effortUpdated: "Thinking effort switched to `{{level}}`.",
+        effortUnsupported: "The current agent does not support dynamic thinking effort.",
+        effortInvalid: "The requested thinking effort is invalid.",
+        effortInvalidDetail: "Available levels: {{levels}}.",
+        effortUnavailable: "Thinking effort is unavailable for the current session.",
         agentRunFailed: "The agent run failed.",
       },
       gateway: {
@@ -74,6 +83,8 @@ const resources = {
         failedToStartNewSession: "Failed to start a new session: {{detail}}",
         failedToResumeSession:
           "Failed to resume the agent session: {{detail}}\nStart a new session with `/new`.",
+        noActiveSessionForEffort:
+          "No active agent session. Send a normal agent message or use `/new` first.",
       },
       cli: {
         examplePrompt:
@@ -128,7 +139,7 @@ const resources = {
       client: {
         processing: "正在处理中...",
         helpMessage:
-          "可用命令：\n\n- `/new [path]` (`/n [path]`) - 开始一个新会话；可选指定工作目录，例如 `/new /path/to/project`。指定过的目录会被记住，之后不带路径的 `/new` 会继续使用它\n- `/compact` (`/c`) - 压缩当前会话上下文\n- `/stop` (`/s`) - 停止当前正在运行的任务\n- `/status` (`/st`) - 查看当前智能体会话状态\n- `/model` (`/m`) - 查看可用模型，或使用 `/model provider/modelId` 切换模型\n- `/schedule-run <任务名>` - 立即运行一次定时任务（结果会发送到该任务的目标聊天）\n- `/schedule-here <任务名>` - 把本会话设为该任务结果的发送目标并确定其归属 channel（请在希望接收结果的聊天里发送；已绑定的任务需先解绑）\n- `/queue-here <队列名>` - 把本会话设为队列结果的发送目标（请在希望接收结果的聊天里发送；已绑定的队列需编辑文件解绑）\n- `/help` (`/h`) - 查看这条帮助信息",
+          "可用命令：\n\n- `/new [path]` (`/n [path]`) - 开始一个新会话；可选指定工作目录，例如 `/new /path/to/project`。指定过的目录会被记住，之后不带路径的 `/new` 会继续使用它\n- `/compact` (`/c`) - 压缩当前会话上下文\n- `/stop` (`/s`) - 停止当前正在运行的任务\n- `/status` (`/st`) - 查看当前智能体会话状态\n- `/model` (`/m`) - 查看可用模型，或使用 `/model provider/modelId` 切换模型\n- `/effort [等级]` (`/thinking [等级]`) - 查看或切换当前模型的思考等级\n- `/schedule-run <任务名>` - 立即运行一次定时任务（结果会发送到该任务的目标聊天）\n- `/schedule-here <任务名>` - 把本会话设为该任务结果的发送目标并确定其归属 channel（请在希望接收结果的聊天里发送；已绑定的任务需先解绑）\n- `/queue-here <队列名>` - 把本会话设为队列结果的发送目标（请在希望接收结果的聊天里发送；已绑定的队列需编辑文件解绑）\n- `/help` (`/h`) - 查看这条帮助信息",
         messageDeliveryFailedTitle: "[agent-bridge 错误] 消息发送失败",
         invalidNewWorkingDirectory:
           "无法开始新会话：工作目录 `{{workingDirectory}}` 无效（{{detail}}）。",
@@ -170,6 +181,15 @@ const resources = {
         modelInvalid: "请求的模型无效或当前不可用。",
         modelBusy: "当前正在运行，无法切换模型。请先使用 `/stop`。",
         modelUpdated: "当前模型已切换至 `{{model}}`。",
+        effortTitle: "思考等级",
+        effortCurrent: "当前",
+        effortAvailable: "可用",
+        effortUsage: "使用 `/effort <等级>` 切换。",
+        effortUpdated: "思考等级已切换为 `{{level}}`。",
+        effortUnsupported: "当前智能体不支持动态调整思考等级。",
+        effortInvalid: "请求的思考等级无效。",
+        effortInvalidDetail: "可用等级：{{levels}}。",
+        effortUnavailable: "当前会话暂时无法获取或调整思考等级。",
         agentRunFailed: "智能体任务执行失败。"
       },
       gateway: {
@@ -180,6 +200,7 @@ const resources = {
         startedNewSession: "已开始新会话（工作目录：{{workingDirectory}}）。",
         failedToStartNewSession: "无法开启新会话：{{detail}}",
         failedToResumeSession: "恢复智能体会话失败：{{detail}}\n请使用 `/new` 开始新会话。",
+        noActiveSessionForEffort: "当前没有智能体会话。请先发送普通消息或使用 `/new`。",
       },
       cli: {
         examplePrompt: "告诉我现在几点了，一句话就好。（这是示例 prompt，请替换成你自己的任务。）",

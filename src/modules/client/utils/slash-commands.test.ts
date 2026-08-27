@@ -35,6 +35,8 @@ describe("resolveHelpMarkdown", () => {
     expect(resolveHelpMarkdown("/help", zh)).toContain("/schedule-run <任务名>");
     expect(resolveHelpMarkdown("/help", en)).toContain("/schedule-here <task-name>");
     expect(resolveHelpMarkdown("/help", zh)).toContain("/schedule-here <任务名>");
+    expect(resolveHelpMarkdown("/help", en)).toContain("/effort [level]");
+    expect(resolveHelpMarkdown("/help", zh)).toContain("/thinking [等级]");
   });
 
   it("returns null for non-help text", () => {
@@ -159,6 +161,29 @@ describe("parseSlashCommand", () => {
       type: "command.session.status",
       clientSessionId: "session-1",
     });
+  });
+
+  it("parses /effort and /thinking query and set commands", () => {
+    expect(parseSlashCommand("/effort", "session-1")).toEqual({
+      type: "command.session.effort.get",
+      clientSessionId: "session-1",
+    });
+    expect(parseSlashCommand("/thinking   ", "session-1")).toEqual({
+      type: "command.session.effort.get",
+      clientSessionId: "session-1",
+    });
+    expect(parseSlashCommand("/effort HIGH", "session-1")).toEqual({
+      type: "command.session.effort.set",
+      clientSessionId: "session-1",
+      level: "HIGH",
+    });
+    expect(parseSlashCommand("/thinking xhigh", "session-1")).toEqual({
+      type: "command.session.effort.set",
+      clientSessionId: "session-1",
+      level: "xhigh",
+    });
+    expect(parseSlashCommand("/effort high extra", "session-1")).toBeNull();
+    expect(parseSlashCommand("/effortish", "session-1")).toBeNull();
   });
 
   it("parses /model and /m into a command.session.model.list event", () => {

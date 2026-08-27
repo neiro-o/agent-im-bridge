@@ -8,5 +8,9 @@ export function isTerminalAgentError(event: ClientInputEvent): event is Terminal
 
 /** Successful responses to local slash commands have no accompanying assistant message. */
 export function isCompletedCommandResponse(event: ClientInputEvent): boolean {
-  return event.type === "agent.status.info" || event.type === "agent.model.list" || event.type === "agent.model.updated";
+  return event.type === "agent.status.info" ||
+    event.type === "agent.model.list" ||
+    event.type === "agent.model.updated" ||
+    event.type === "agent.effort.info" ||
+    event.type === "agent.effort.updated";
 }

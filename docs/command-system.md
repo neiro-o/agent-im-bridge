@@ -25,6 +25,9 @@ All client adapters use the same command parser, so the command behavior is cons
 | `/model` | List available models for the current active agent session | `command.session.model.list` |
 | `/m` | Alias of `/model` | `command.session.model.list` or `command.session.model.set` |
 | `/model provider/modelId` | Switch the current active agent session model | `command.session.model.set` |
+| `/effort` | Show the current and available thinking levels | `command.session.effort.get` |
+| `/effort <level>` | Switch the current thinking level | `command.session.effort.set` |
+| `/thinking [level]` | Alias of `/effort [level]` | effort get or set event |
 | `/help` | Show the built-in command help for the current client locale | Local client-side help response |
 | `/h` | Alias of `/help` | Local client-side help response |
 
@@ -36,7 +39,8 @@ The parser is deliberately strict and predictable:
 2. Zero-argument commands must match a supported command exactly.
 3. `/new` and `/n` additionally support an optional argument tail, interpreted as the working directory for the new session.
 4. `/model` and `/m` additionally support a single argument tail, interpreted as the target model string.
-5. Matching is case-insensitive for the command name. The working directory tail is trimmed of leading/trailing whitespace but otherwise preserved exactly as typed (including case, internal spaces, and Unicode).
+5. `/effort` and `/thinking` accept zero or one whitespace-free level argument. The level name is normalized case-insensitively by the core.
+6. Matching is case-insensitive for the command name. The working directory tail is trimmed of leading/trailing whitespace but otherwise preserved exactly as typed (including case, internal spaces, and Unicode).
 
 That means these are valid:
 
@@ -59,6 +63,9 @@ That means these are valid:
 - `/m`
 - `/model anthropic/claude-sonnet-4-5`
 - `/m openai/gpt-5`
+- `/effort`
+- `/effort high`
+- `/thinking xhigh`
 - `/New /Users/Wesley/MyProject`
 - `/Compact`
 - `/C`
@@ -93,7 +100,7 @@ This avoids accidental command execution when users are just talking naturally, 
 - a command message, or
 - a normal user message
 
-Only `/new`/`/n` and `/model`/`/m` accept an argument tail. All other commands must match exactly.
+Only `/new`/`/n`, `/model`/`/m`, and `/effort`/`/thinking` accept an argument tail. All other commands must match exactly.
 
 ## Runtime behavior
 

@@ -104,11 +104,13 @@ The adapter starts PI in RPC mode and provides:
 - persistent session creation and restoration
 - `/new <path>` to start a session in a specific working directory
 - messages sent while PI is busy using PI's steering behavior
-- `/stop`, `/compact`, `/status`, and `/model`
+- `/stop`, `/compact`, `/status`, `/model`, `/effort`, and `/thinking`
 - reasoning, tool progress, final text, and local attachments
 - PI extensions, skills, prompt templates, context files, and packages loaded by the PI process
 
 PI configuration remains owned by PI. Files such as `~/.pi/agent/settings.json`, `~/.pi/agent/models.json`, `AGENTS.md`, and project `.pi` resources continue to work according to PI's normal loading and project-trust rules.
+
+`/effort` (alias `/thinking`) operates only on an existing active PI session. The bridge queries PI's `get_available_thinking_levels` RPC for every query or change, so the valid values follow the current provider/model rather than a bridge-wide static list. A model switch can therefore change the available levels. `/effort` never creates or resumes a session implicitly.
 
 ## Working directories
 

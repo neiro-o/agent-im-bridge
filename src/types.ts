@@ -65,6 +65,15 @@ export type ClientOutputEvent =
       type: "command.session.model.set";
       clientSessionId: string;
       target: string;
+    }
+  | {
+      type: "command.session.effort.get";
+      clientSessionId: string;
+    }
+  | {
+      type: "command.session.effort.set";
+      clientSessionId: string;
+      level: string;
     };
 
 export type AgentInputEvent =
@@ -133,6 +142,15 @@ type AgentOutputPayload =
       modelId: string;
     }
   | {
+      type: "agent.effort.info";
+      currentLevel?: string;
+      availableLevels: string[];
+    }
+  | {
+      type: "agent.effort.updated";
+      level: string;
+    }
+  | {
       type: "error";
       kind: string;
       detail?: string;
@@ -189,6 +207,8 @@ export interface AgentAdapter {
   getStatus?(): Promise<AgentSessionStatus>;
   getAvailableModels?(): Promise<AgentAvailableModel[]>;
   setModel?(target: string): Promise<{ provider: string; modelId: string }>;
+  getAvailableThinkingLevels?(): Promise<string[]>;
+  setThinkingLevel?(level: string): Promise<void>;
   input(event: AgentInputEvent): Promise<void>;
 }
 
