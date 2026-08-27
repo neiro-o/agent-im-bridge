@@ -778,38 +778,60 @@ export class Scheduler {
     }
   }
 
+  /**
+   * Handles a run timeout (cleanup-chain hardening, timeout teardown
+   * spec D3): one top-level try/catch wraps the whole chain — the timer
+   * callback is a floating promise, so an unexpected throw anywhere would
+   * otherwise break the chain silently. Local steps first (the history line;
+   * the scheduler has no task file), remote steps last, with the release
+   * dispatch fired and forgotten so a hung/throwing dispatch cannot block
+   * the notice delivery.
+   */
   async #handleTimeout(sessionId: string): Promise<void> {
-    const record = this.#runs.get(sessionId);
-    if (record === undefined) return; // run already ended
-    this.#runs.delete(sessionId);
-    record.probe.stop();
-    const { task } = record;
-    this.#logger.warn(`[schedule] task "${task.name}" timed out after ${task.timeoutMs}ms`);
-    await this.#writeHistory(record, "timeout", {
-      reason: `timed out after ${task.timeoutMs}ms`,
-    });
+    try {
+      const record = this.#runs.get(sessionId);
+      if (record === undefined) return; // run already ended
+      this.#runs.delete(sessionId);
+      record.probe.stop();
+      const { task } = record;
+      this.#logger.warn(`[schedule] task "${task.name}" timed out after ${task.timeoutMs}ms`);
 
-    const target = task.target;
-    if (target === undefined) {
-      this.#logger.warn(`[schedule] task "${task.name}" has no target to deliver its timeout notice to`);
-      return;
+      await this.#writeHistory(record, "timeout", {
+        reason: `timed out after ${task.timeoutMs}ms`,
+      });
+
+      const target = task.target;
+      if (target === undefined) {
+        this.#logger.warn(`[schedule] task "${task.name}" has no target to deliver its timeout notice to`);
+      } else {
+        // The partial transcript is NOT inlined — the kept accumulation file is
+        // referenced by the trailing italic one-liner.
+        const suffix = this.#t("schedule.taskTimedOutSuffix", {
+          name: task.name,
+          path: record.accumulator.filePath,
+        });
+        await this.#deliverToTarget(target, suffix);
+      }
+    } catch (error) {
+      // Top-level net (D3): log loudly instead of a silent floating rejection.
+      this.#logger.error(
+        `[schedule] unexpected failure in the timeout handler for run "${sessionId}":`,
+        error,
+      );
     }
 
-    // Abort this run's own session. NOTE: the shared event type has no
-    // `command.session.abort`; `command.session.stop` is the equivalent core
-    // command (it calls agentAdapter.abort()).
-    await this.#dispatchSafe({
-      type: "command.session.stop",
+    // Fully tear down this run's session (timeout teardown spec D2/D1):
+    // unlike interactive `/stop` (abort-only), release terminates the agent
+    // process so a timed-out run cannot be revived by queued probes. This is
+    // unconditional — it must not depend on the task having a deliverable
+    // target, or a target-less timed-out run would leak a headless process.
+    // Deliberately NOT awaited (last, fire-and-forget): #dispatchSafe already
+    // contains throws, and a dispatch that never settles must not block or
+    // break the cleanup completed above.
+    void this.#dispatchSafe({
+      type: "command.session.release",
       clientSessionId: sessionId,
     });
-
-    // The partial transcript is NOT inlined — the kept accumulation file is
-    // referenced by the trailing italic one-liner.
-    const suffix = this.#t("schedule.taskTimedOutSuffix", {
-      name: task.name,
-      path: record.accumulator.filePath,
-    });
-    await this.#deliverToTarget(target, suffix);
   }
 
   #endRun(sessionId: string): void {

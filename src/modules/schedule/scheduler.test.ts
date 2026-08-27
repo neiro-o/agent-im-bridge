@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ClientInputEvent, ClientOutputEvent, OutboundAttachment } from "../../types";
+import type { ClientInputEvent, ClientOutputEvent, IngressResult, OutboundAttachment } from "../../types";
 import { getTranslator } from "../../i18n";
 import type { Logger } from "../../core/logger";
 import {
@@ -557,7 +557,7 @@ describe("dispatch failure (T6)", () => {
 });
 
 describe("timeout (D5)", () => {
-  it("aborts the synthetic session and delivers a localized timeout notice", async () => {
+  it("releases the synthetic session and delivers a localized timeout notice", async () => {
     const h = createHarness({
       tasks: [makeLoaded(makeTask({ name: "slow", target: TARGET, timeoutMs: 100 }))],
     });
@@ -565,7 +565,7 @@ describe("timeout (D5)", () => {
     await h.scheduler.runNow("slow");
 
     await waitFor(() => expect(h.delivered).toHaveLength(1));
-    expect(h.dispatched[2]).toEqual({ type: "command.session.stop", clientSessionId: h.runId("slow", 1) });
+    expect(h.dispatched[2]).toEqual({ type: "command.session.release", clientSessionId: h.runId("slow", 1) });
     expect(h.delivered[0]).toEqual({
       type: "assistant.message",
       clientSessionId: TARGET,
@@ -600,6 +600,69 @@ describe("timeout (D5)", () => {
     expect(h.delivered[0]!.text).not.toContain("partial work");
     // The accumulation file (with the partial work) is still on disk.
     await expect(stat(runOutputPath(h.outputsDir, h.runId("slow", 1)))).resolves.toBeDefined();
+  });
+
+  it("completes notice and history when the release dispatch hangs forever (timeout teardown spec D3)", async () => {
+    // A permanently hung synthetic dispatch must not stall/break the rest of
+    // the timeout chain: history was written, and since the dispatcher never
+    // resolves there is nothing to await anymore — the notices flow normally.
+    const releaseBlocked = new Promise<IngressResult>(() => {});
+    const h = createHarness({
+      tasks: [makeLoaded(makeTask({ name: "slow", target: TARGET, timeoutMs: 80 }))],
+    });
+    const releaseSeen = new Promise<void>((resolve) => {
+      h.dispatchClientEvent.mockImplementation(async (event: ClientOutputEvent) => {
+        h.dispatched.push(event);
+        if (event.type === "command.session.release") {
+          resolve();
+          return releaseBlocked;
+        }
+        return { ok: true } as const;
+      });
+    });
+    await h.scheduler.start();
+    await h.scheduler.runNow("slow");
+
+    await releaseSeen;
+    await vi.waitFor(() => expect(h.delivered).toHaveLength(1));
+    expect(h.delivered[0]).toEqual({
+      type: "assistant.message",
+      clientSessionId: TARGET,
+      text: timedOutSuffix(h, "slow", h.runId("slow", 1)),
+    });
+    expect(await readRunHistory("schedule", h.historyRoot)).toMatchObject([
+      { runId: h.runId("slow", 1), outcome: "timeout" },
+    ]);
+  });
+
+  it("still tears down the session when the chain throws before the release (timeout teardown spec D3)", async () => {
+    // History append throws AND the target chat vanished (delivery failure
+    // is caught, rethrowing keeps the throw alive past the top-level catch):
+    // the fire-and-forget release must still go out, or a headless process
+    // leaks (decided D1/D2 semantics).
+    const historySpy = vi
+      .spyOn(historyModule, "appendRunHistory")
+      .mockRejectedValue(new Error("disk exploded"));
+    try {
+      const h = createHarness({
+        tasks: [
+          makeLoaded(makeTask({ name: "slow", target: TARGET, timeoutMs: 80 })),
+        ],
+      });
+      h.deliver.mockRejectedValue(new Error("chat deleted"));
+      await h.scheduler.start();
+      await h.scheduler.runNow("slow");
+
+      await waitFor(() =>
+        expect(h.dispatched.some((e) => e.type === "command.session.release")).toBe(true),
+      );
+      expect(h.logger.error).toHaveBeenCalledWith(
+        expect.stringContaining("unexpected failure in the timeout handler"),
+        expect.any(Error),
+      );
+    } finally {
+      historySpy.mockRestore();
+    }
   });
 });
 
@@ -1020,10 +1083,10 @@ describe("concurrent runs of the same task (D5)", () => {
     // session and delivers the timeout notice for run 2.
     await waitFor(() => expect(h.delivered).toHaveLength(2));
     expect(
-      h.dispatched.some((e) => e.type === "command.session.stop" && e.clientSessionId === h.runId("report", 2)),
+      h.dispatched.some((e) => e.type === "command.session.release" && e.clientSessionId === h.runId("report", 2)),
     ).toBe(true);
     expect(
-      h.dispatched.some((e) => e.type === "command.session.stop" && e.clientSessionId === h.runId("report", 1)),
+      h.dispatched.some((e) => e.type === "command.session.release" && e.clientSessionId === h.runId("report", 1)),
     ).toBe(false);
     expect(h.delivered[1]).toEqual({
       type: "assistant.message",
@@ -1437,9 +1500,9 @@ describe("stop() races (SF-2)", () => {
     expect(await firePromise).toEqual({ ok: true });
 
     // The run's 50 ms timer was cleared by stop(): long past its timeout
-    // there is no stop dispatch and no timeout notice.
+    // there is no release dispatch and no timeout notice.
     await sleep(200);
-    expect(h.dispatched.filter((e) => e.type === "command.session.stop")).toEqual([]);
+    expect(h.dispatched.filter((e) => e.type === "command.session.release")).toEqual([]);
     expect(h.delivered).toEqual([]);
   });
 
@@ -1488,10 +1551,10 @@ describe("stop() races (SF-2)", () => {
     // controller's #failFire mirrors this.
     expect(await readRunHistory("schedule", h.historyRoot)).toEqual([]);
 
-    // The run was ended: its 50 ms timer never fires (no stop dispatch, no
+    // The run was ended: its 50 ms timer never fires (no release dispatch, no
     // timeout notice) and any late output is treated as an orphan.
     await sleep(200);
-    expect(h.dispatched.filter((e) => e.type === "command.session.stop")).toEqual([]);
+    expect(h.dispatched.filter((e) => e.type === "command.session.release")).toEqual([]);
     expect(h.delivered).toEqual([]);
     h.scheduler.handleOutput({ type: "assistant.message", clientSessionId: h.runId("report", 1), text: "x" });
     expect(h.delivered).toEqual([]);

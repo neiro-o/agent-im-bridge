@@ -40,6 +40,20 @@ export type ClientOutputEvent =
       clientSessionId: string;
     }
   | {
+      /**
+       * Full teardown of the session's agent runtime (controller-synthesized;
+       * IM adapters never produce it): the core stops the adapter process
+       * (SIGTERM→SIGKILL semantics of `AgentAdapter.stop`), removes the
+       * runtime, revokes its live state handles and deletes a synthetic
+       * session's persisted record. Unlike `command.session.stop` (abort the
+       * current turn only), this terminates the whole run's session — used by
+       * the queue/scheduler timeout paths so a timed-out agent cannot keep
+       * running headless. Unknown sessions are an idempotent no-op.
+       */
+      type: "command.session.release";
+      clientSessionId: string;
+    }
+  | {
       type: "command.session.status";
       clientSessionId: string;
     }

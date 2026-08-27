@@ -151,7 +151,7 @@ A bound queue cannot be rebound with `/queue-here`. To move it to another chat, 
 
 The per-channel queue controller runs next to the scheduler and only consumes queues whose `channel` matches its channel. Each task runs in a **fresh, fully isolated agent session**:
 
-1. On its tick the controller reloads the queue definitions and, for every bound queue (`target` set), computes **capacity = workers − inFlight**, takes the oldest `pending` tasks up to that capacity, marks them `running`, and fires each.
+1. On its tick the controller reloads the queue definitions and, for every bound queue (`target` set), reconciles zombie tasks (see [Failure: fail-and-drop](#failure-fail-and-drop)), computes **capacity = workers − inFlight**, takes the oldest `pending` tasks up to that capacity, marks them `running`, and fires each.
 2. **Fire** injects two synthetic events through the same ingress path ordinary chat messages use: a `command.session.new` whose working directory resolves task `directory:` → queue `directory:` → bridge process cwd (validated at fire time; the canonical path is sent) and the queue's pinned `model` (when it has one) — the override rides the same event into the agent-session creation, so only this queue's runs use it — followed by a `user.message` whose text is `<queue body>\n\n<task prompt>` (the bare prompt when the body is empty), wrapped with the fixed completion-protocol instruction block. Both carry a synthetic, run-unique client session id of the form `queue:<queue-name>:<task-id>`.
 3. Each run carries a timeout timer set from the queue's `timeout` front matter (5-hour default, same as scheduled tasks) and a silence probe (`silence` front matter, default `10m`). A run ends by completing, failing, or timing out.
 
@@ -183,7 +183,18 @@ A task fails for exactly one of four reasons, and in every case the task file is
 
 *Queue "<name>" task failed*`), and the task is dropped. There is no fallback to the channel default model — the follow-up prompt is never sent, so the task cannot silently run on the wrong model. (A bad model is the usual cause; treat the `model` field as "pin it and verify the first task succeeded on the intended model".)
 - **Runtime error** — a terminal `error` event during the run delivers the same format — the error reason first, then the italic one-liner `*Queue "<name>" task failed · full output: <path>*` — and drops the task. The partial transcript is **not** inlined; it stays in the kept accumulation file the suffix references.
-- **Timeout** — the run exceeds its wall-clock limit (the queue's `timeout` front matter, 5-hour default): the controller aborts that run's session and delivers the italic one-liner `*Queue "<name>" task timed out · full output: <path>*`. The partial transcript is **not** inlined; it stays in the kept accumulation file.
+- **Timeout** — the run exceeds its wall-clock limit (the queue's `timeout` front matter, 5-hour default): the controller tears down the run's agent session — the agent process is terminated (SIGTERM, then SIGKILL if it does not exit), not merely turn-aborted, so a timed-out agent cannot keep running headless — writes the history line, deletes the task file, and delivers the italic one-liner `*Queue "<name>" task timed out · full output: <path>*`. The partial transcript is **not** inlined; it stays in the kept accumulation file. The cleanup chain is deliberately ordered so it cannot be wedged by a hung bridge→agent dispatch: local steps (history, task-file delete) happen first, the release is dispatched **without waiting for it** to finish, and an unexpected failure anywhere just logs an error instead of silently abandoning what is left to do. Known limitation: processes the agent spawned outside its own process group (e.g. workers launched via tmux) are not killed by the teardown.
+
+### Zombie running files self-heal on a tick
+
+If a cleanup chain ever dies between removing the run from memory and deleting the task file (the 8/26 incident: a permanently hanging dispatch stalled the chain), the task file would stay `running` forever — with `workers: 1` making the queue look busy while nothing runs, until a bridge restart. Every tick now reconciles each owned, enabled, bound queue: a task file still marked `running` whose run no longer exists is **deleted** with a warn log in the bridge's logs. It is deliberately not re-queued as `pending`: a mid-session zombie means the run terminated without finishing, so re-running it could repeat side effects — insert the task again if you want it re-executed.
+
+Two protections keep this reconciliation away from healthy work:
+
+- A run that ended less than two ticks ago is skipped — its normal cleanup chain may simply still be mid-flight (ticks and run timers are independent, so they can interleave).
+- Files stranded `running` by a channel stop are untouched: they belong to the next start's at-least-once reset (see below).
+
+Queues that are not consumed right now (disabled, unbound, or owned by another channel) are skipped too; once a queue becomes consumable again, its zombies are healed by the first tick after that.
 
 ### Restart semantics: at-least-once
 

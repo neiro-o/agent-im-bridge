@@ -2763,6 +2763,106 @@ describe("GatewayCore", () => {
     expect(store.state.agentSessions[agentSessionId]).toBeUndefined();
   });
 
+  it("command.session.release tears down the runtime and deletes the synthetic record (SF-1)", async () => {
+    // Timeout teardown spec D1: release routes through #stopRuntime — abort +
+    // adapter.stop + runtime removal + synthetic record deletion — and
+    // delivers nothing into the (readerless) synthetic session.
+    const imAdapter = new FakeIMAdapter();
+    const store = makeStore();
+    const createdAdapters: FakeAgentAdapter[] = [];
+
+    const core = new GatewayCore({
+      imAdapter,
+      agentModule: makeFakeModule({ createdAdapters }),
+      agentConfig: {},
+      agentIdleTimeoutMs: 60_000,
+      channelStateStore: store,
+    });
+    running.push(core);
+    await core.start();
+
+    await core.input({
+      type: "command.session.new",
+      clientSessionId: "queue:ops:1750000000000-abcd",
+      workingDirectory: "/tmp/project-a",
+      workingDirectorySource: "default",
+    });
+    await waitFor(() => expect(createdAdapters).toHaveLength(1));
+    const adapter = createdAdapters[0]!;
+    const agentSessionId = adapter.agentSessionId;
+    expect(store.state.agentSessions[agentSessionId]).toBeDefined();
+
+    await expect(
+      core.input({
+        type: "command.session.release",
+        clientSessionId: "queue:ops:1750000000000-abcd",
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(adapter.abortCount).toBe(1);
+    expect(adapter.stopCount).toBe(1);
+    expect(store.state.agentSessions[agentSessionId]).toBeUndefined();
+    expect(imAdapter.outputs).toEqual([]);
+
+    // A second release is an idempotent no-op (the runtime is gone).
+    await expect(
+      core.input({
+        type: "command.session.release",
+        clientSessionId: "queue:ops:1750000000000-abcd",
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(adapter.stopCount).toBe(1);
+  });
+
+  it("command.session.release on a chat session keeps its record and binding for later resume", async () => {
+    const imAdapter = new FakeIMAdapter();
+    const store = makeStore();
+    const createdAdapters: FakeAgentAdapter[] = [];
+
+    const core = new GatewayCore({
+      imAdapter,
+      agentModule: makeFakeModule({ createdAdapters }),
+      agentConfig: {},
+      agentIdleTimeoutMs: 60_000,
+      channelStateStore: store,
+    });
+    running.push(core);
+    await core.start();
+
+    await imAdapter.emit({ type: "user.message", clientSessionId: "client-1", text: "hi" });
+    await waitFor(() => expect(createdAdapters).toHaveLength(1));
+    const adapter = createdAdapters[0]!;
+    const agentSessionId = adapter.agentSessionId;
+    expect(store.state.agentSessions[agentSessionId]).toBeDefined();
+
+    await expect(
+      core.input({ type: "command.session.release", clientSessionId: "client-1" }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(adapter.stopCount).toBe(1);
+    // Non-synthetic session: record and binding stay (same as idle release),
+    // so the chat can resume the session later.
+    expect(store.state.agentSessions[agentSessionId]).toBeDefined();
+    expect(store.state.bindings["client-1"]).toBe(agentSessionId);
+  });
+
+  it("command.session.release for an unknown session is an ok no-op", async () => {
+    const imAdapter = new FakeIMAdapter();
+    const core = new GatewayCore({
+      imAdapter,
+      agentModule: makeFakeModule({ createdAdapters: [] }),
+      agentConfig: {},
+      agentIdleTimeoutMs: 60_000,
+    });
+    running.push(core);
+    await core.start();
+
+    await expect(
+      core.input({ type: "command.session.release", clientSessionId: "queue:ghost:0-0000" }),
+    ).resolves.toEqual({ ok: true });
+    expect(imAdapter.outputs).toEqual([]);
+  });
+
   it("input() resolves { ok: true } on success for session.new and user.message", async () => {
     const imAdapter = new FakeIMAdapter();
     const store = makeStore();

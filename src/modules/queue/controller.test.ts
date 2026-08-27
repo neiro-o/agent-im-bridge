@@ -7,11 +7,13 @@ import { getTranslator } from "../../i18n";
 import type { Logger } from "../../core/logger";
 import {
   bindQueue,
+  deleteQueueTask,
   insertQueueTask,
   listQueueTasks,
   setQueueEnabled,
   setQueueTaskState,
 } from "./queue-file";
+import * as queueFileModule from "./queue-file";
 import { buildProbeMessage, buildTaskPrompt, DONE_MARKER, sanitizeSessionId } from "../run-completion";
 import { readRunHistory, type RunHistoryRecord } from "../run-completion/history";
 import { QueueController } from "./controller";
@@ -553,14 +555,14 @@ describe("fail-and-drop (D2, decided)", () => {
     expect(h.delivered).toHaveLength(1);
   });
 
-  it("times out a long-running task: abort dispatch, failure notice, task dropped", async () => {
+  it("times out a long-running task: release dispatch, failure notice, task dropped", async () => {
     const h = await createHarness({ runTimeoutMs: 50 });
     const [id] = await seedQueue(h.root, "q", { target: TARGET }, ["a"]);
     await h.controller.start();
     await waitFor(() => expect(h.dispatched).toHaveLength(2));
 
     await waitFor(() => expect(h.delivered).toHaveLength(1));
-    expect(h.dispatched[2]).toEqual({ type: "command.session.stop", clientSessionId: `queue:q:${id}` });
+    expect(h.dispatched[2]).toEqual({ type: "command.session.release", clientSessionId: `queue:q:${id}` });
     expect(h.delivered[0]).toEqual({
       type: "assistant.message",
       clientSessionId: TARGET,
@@ -756,7 +758,7 @@ describe("stop() races (SF-2)", () => {
     // The run's 50 ms timer was cleared by stop(): no stop dispatch, no
     // timeout notice.
     await sleep(200);
-    expect(h.dispatched.filter((e) => e.type === "command.session.stop")).toEqual([]);
+    expect(h.dispatched.filter((e) => e.type === "command.session.release")).toEqual([]);
     expect(h.delivered).toEqual([]);
   });
 
@@ -1258,7 +1260,7 @@ describe("per-queue timeout (definition `timeout:` front matter)", () => {
     // No controller.handleOutput arrives; the queue's 1 s timer fires.
     await waitFor(() => expect(h.delivered).toHaveLength(1));
     expect(h.dispatched[2]).toEqual({
-      type: "command.session.stop",
+      type: "command.session.release",
       clientSessionId: `queue:q:${id}`,
     });
     await waitFor(async () => expect(await listQueueTasks("q", h.root)).toHaveLength(0));
@@ -1554,5 +1556,218 @@ describe("stop() mid-run (T4)", () => {
     // The task file stays `running` (restart re-enqueues it unchanged).
     const tasks = await listQueueTasks("q", h.root);
     expect(tasks.some((t) => t.id === ids[0] && t.state === "running")).toBe(true);
+  });
+});
+
+describe("timeout cleanup chain hardening (timeout teardown spec D3)", () => {
+  it("deletes the task file and delivers the notice while the release dispatch hangs forever", async () => {
+    // The incident shape: a dispatch that never settles must not hold the
+    // rest of the timeout chain hostage. Local cleanup (history line, task
+    // file) and the notice must all complete.
+    const releaseBlocked = new Promise<IngressResult>(() => {}); // never settles
+    const h = await createHarness({ runTimeoutMs: 80 });
+    h.dispatchClientEvent.mockImplementation(async (event: ClientOutputEvent) => {
+      h.dispatched.push(event);
+      if (event.type === "command.session.release") {
+        return releaseBlocked;
+      }
+      return { ok: true } as const;
+    });
+    const [id] = await seedQueue(h.root, "q", { target: TARGET }, ["a"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    // The timed-out chain finished WITHOUT the hung release being awaited:
+    // the task file is deleted, history written, notice delivered, no error
+    // logged (a floating rejection would surface as logger.error).
+    await waitFor(async () => expect(await listQueueTasks("q", h.root)).toHaveLength(0));
+    await waitFor(() => expect(h.delivered).toHaveLength(1));
+    expect(h.delivered[0]).toEqual({
+      type: "assistant.message",
+      clientSessionId: TARGET,
+      text: timedOutSuffix(h, "q", `queue:q:${id}`),
+    });
+    expect(h.dispatched.filter((e) => e.type === "command.session.release")).toHaveLength(1);
+    expect(await history(h)).toEqual([
+      expect.objectContaining({ runId: `queue:q:${id}`, outcome: "timeout" }),
+    ]);
+    expect(h.logger.error).not.toHaveBeenCalled();
+  });
+
+  it("keeps the timeout chain alive when the local cleanup throws", async () => {
+    // History append succeeds but the task-file delete fails (#deleteTask
+    // catches its own fs error and logs it): the chain must proceed to the
+    // notice + fire-and-forget release, and the failure must stay a logged
+    // one-liner — never an unhandled rejection. The surviving file becomes a
+    // zombie that the D4 reconciliation heals on a later tick.
+    const h = await createHarness({ runTimeoutMs: 80 });
+    const deleteSpy = vi
+      .spyOn(queueFileModule, "deleteQueueTask")
+      .mockRejectedValue(new Error("disk exploded"));
+    try {
+      const [id] = await seedQueue(h.root, "q", { target: TARGET }, ["a"]);
+      await h.controller.start();
+      await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+      await waitFor(() => expect(h.delivered).toHaveLength(1));
+      expect(h.delivered[0]).toEqual({
+        type: "assistant.message",
+        clientSessionId: TARGET,
+        text: timedOutSuffix(h, "q", `queue:q:${id}`),
+      });
+      expect(h.dispatched.filter((e) => e.type === "command.session.release")).toHaveLength(1);
+      expect(await history(h)).toEqual([
+        expect.objectContaining({ runId: `queue:q:${id}`, outcome: "timeout" }),
+      ]);
+      expect(h.logger.error).toHaveBeenCalledWith(
+        `[queue] failed to delete task "${id}" of queue "q":`,
+        expect.any(Error),
+      );
+    } finally {
+      deleteSpy.mockRestore();
+    }
+  });
+});
+
+describe("zombie reconciliation (timeout teardown spec D4)", () => {
+  it("heals a task file stranded running by a failed cleanup delete once the tombstone ages out", async () => {
+    // The incident shape, self-healed: the timeout chain wrote history and
+    // delivered the notice, but its task-file DELETE failed (#deleteTask
+    // catches internally — mocked here as "disk exploded"). The file stays
+    // `running` with no live run; within the grace window the reconciliation
+    // spares it (fresh tombstone), and once the tombstone ages past 2×tickMs
+    // a tick deletes it with a warn — no bridge restart needed.
+    const h = await createHarness({ runTimeoutMs: 80 });
+    const deleteSpy = vi
+      .spyOn(queueFileModule, "deleteQueueTask")
+      .mockRejectedValue(new Error("disk exploded"));
+    const [id] = await seedQueue(h.root, "q", { target: TARGET }, ["a"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+    await waitFor(() => expect(h.delivered).toHaveLength(1)); // chain completed
+    deleteSpy.mockRestore(); // disk recovers for everyone else
+
+    // Fresh tombstone: still spared. Past 2×tickMs: healed.
+    await sleep(60);
+    await waitFor(async () => expect(await listQueueTasks("q", h.root)).toHaveLength(0));
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      `[queue] deleted zombie running task "${id}" of queue "q" (no active run for it)`,
+    );
+  });
+
+  it("spares a running file whose tombstone is inside the grace window", async () => {
+    // D4 race window: endRun recorded the end (DONE path) but the completion
+    // chain has not yet deleted the task file (suspended in its delivery via
+    // the gate). The FIRST tick interleaving must NOT eat the file out from
+    // under that chain: tickMs=300 keeps any post-arm tick age < 2×tickMs.
+    const h = await createHarness({ tickMs: 300, runTimeoutMs: 60_000 });
+    const [id] = await seedQueue(h.root, "q", { target: TARGET }, ["a"]);
+    let releaseCompletion!: () => void;
+    const completionGate = new Promise<void>((resolve) => {
+      releaseCompletion = resolve;
+    });
+    const deliverStarted = new Promise<void>((resolve) => {
+      h.deliver.mockImplementationOnce(async () => {
+        resolve();
+        await completionGate;
+      });
+    });
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    // Interleave point: registry already cleared (#endRun ran synchronously
+    // in handleOutput), tombstone fresh, task file not yet deleted.
+    void h.controller.handleOutput({
+      type: "assistant.message",
+      clientSessionId: `queue:q:${id}`,
+      text: `done\n${DONE_MARKER}`,
+    });
+    await deliverStarted;
+
+    // The next tick(s) fire mid-chain (within the grace window).
+    await sleep(320);
+    expect((await listQueueTasks("q", h.root)).map((t) => t.id)).toEqual([id]);
+    expect(h.logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining(`deleted zombie running task "${id}"`),
+    );
+
+    // Let the normal chain finish its own delete cleanly.
+    releaseCompletion();
+    await waitFor(async () => expect(await listQueueTasks("q", h.root)).toHaveLength(0));
+    expect(h.logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining(`deleted zombie running task "${id}"`),
+    );
+  });
+
+  it("deletes a zombie whose cleanup chain died and the tombstone has aged past the grace window", async () => {
+    // Same suspended-chain setup, but the chain NEVER resumes: registry
+    // cleared, stale tombstone, leftover `running` file — exactly the incident
+    // shape. Within ~2×tickMs a tick reconciles it away without a restart.
+    const h = await createHarness({ tickMs: 150, runTimeoutMs: 60_000 });
+    const [id] = await seedQueue(h.root, "q", { target: TARGET }, ["a"]);
+    const deliverStarted = new Promise<void>((resolve) => {
+      h.deliver.mockImplementationOnce(async () => {
+        resolve();
+        await new Promise<void>(() => {}); // the chain dies here for good
+      });
+    });
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    void h.controller.handleOutput({
+      type: "assistant.message",
+      clientSessionId: `queue:q:${id}`,
+      text: `done\n${DONE_MARKER}`,
+    });
+    await deliverStarted;
+
+    // Grace = 2×150ms: the first tick spares the file, a later one heals it.
+    await sleep(160);
+    expect((await listQueueTasks("q", h.root)).map((t) => t.id)).toEqual([id]);
+    await waitFor(async () => expect(await listQueueTasks("q", h.root)).toHaveLength(0));
+    expect(h.logger.warn).toHaveBeenCalledWith(
+      `[queue] deleted zombie running task "${id}" of queue "q" (no active run for it)`,
+    );
+  });
+
+  it("never touches an in-flight run's running file across ticks", async () => {
+    const h = await createHarness({ runTimeoutMs: 60_000 });
+    const ids = await seedQueue(h.root, "q", { workers: 1, target: TARGET }, ["a", "b"]);
+    await h.controller.start();
+    await waitFor(() => expect(h.dispatched).toHaveLength(2));
+
+    // Several ticks pass while task "a" is genuinely in flight (registered):
+    // its file stays exactly as-is, pending "b" untouched.
+    await sleep(100);
+    const tasks = await listQueueTasks("q", h.root);
+    expect(tasks.filter((t) => t.state === "running").map((t) => t.id)).toEqual([ids[0]]);
+    expect(tasks.filter((t) => t.state === "pending").map((t) => t.id)).toEqual([ids[1]]);
+    expect(h.logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining("deleted zombie running task"),
+    );
+  });
+
+  it("skips foreign, disabled and unbound queues during reconciliation", async () => {
+    const h = await createHarness({ tickMs: 20 });
+    await seedQueue(h.root, "foreign", { channel: "other", target: TARGET }, []);
+    await seedQueue(h.root, "disabled", { enabled: false, target: TARGET }, []);
+    // Unbound: no channel line at all (`{ channel: undefined }`).
+    await seedQueue(h.root, "unbound", { channel: undefined }, []);
+    await insertQueueTask("foreign", "stuck in foreign", h.root);
+    await insertQueueTask("disabled", "stuck in disabled", h.root);
+    await insertQueueTask("unbound", "stuck in unbound", h.root);
+    for (const name of ["foreign", "disabled", "unbound"]) {
+      const tasks = await listQueueTasks(name, h.root);
+      await setQueueTaskState(name, tasks[0]!.id, "running", h.root);
+    }
+
+    await h.controller.start();
+    await sleep(80);
+    expect(await listQueueTasks("foreign", h.root)).toHaveLength(1);
+    expect(await listQueueTasks("disabled", h.root)).toHaveLength(1);
+    expect(await listQueueTasks("unbound", h.root)).toHaveLength(1);
+    expect(h.logger.warn).not.toHaveBeenCalledWith(
+      expect.stringContaining("deleted zombie running task"),
+    );
   });
 });

@@ -124,6 +124,16 @@ export class QueueController {
   /** Active runs keyed by their run-unique synthetic session id. */
   readonly #runs = new Map<string, RunRecord>();
 
+  /**
+   * Tombstones (timeout teardown spec D4): the epoch-ms time each run ended,
+   * keyed by session id. While a tombstone is fresher than 2×tickMs the tick
+   * reconciliation treats a leftover `running` task file as possibly still in
+   * its normal cleanup chain instead of a zombie — a tick can interleave with
+   * the timeout chain (independent timer chains). Pruned each tick and each
+   * end (see {@link #pruneEndedTombstones}), so it cannot grow unbounded.
+   */
+  readonly #endedAt = new Map<string, number>();
+
   #started = false;
   #tickTimer: NodeJS.Timeout | null = null;
 
@@ -256,6 +266,9 @@ export class QueueController {
 
   async #tick(): Promise<void> {
     if (!this.#started) return;
+    // Drop tombstones past their grace window before deciding anything about
+    // task files (timeout teardown spec D4).
+    this.#pruneEndedTombstones();
     let definitions: QueueDefinition[];
     try {
       definitions = await listQueueDefinitions(this.#queuesRoot);
@@ -278,9 +291,6 @@ export class QueueController {
       // `/queue-here` binds a chat (spec D2).
       if (definition.target === undefined) continue;
 
-      const capacity = definition.workers - this.#inFlight(definition.name);
-      if (capacity <= 0) continue;
-
       let tasks: QueueTask[];
       try {
         tasks = await listQueueTasks(definition.name, this.#queuesRoot);
@@ -288,8 +298,17 @@ export class QueueController {
         this.#logger.error(`[queue] failed to load tasks of queue "${definition.name}":`, error);
         continue;
       }
+
+      // Zombie reconciliation (timeout teardown spec D4) BEFORE the capacity
+      // math: files orphaned by a broken cleanup chain must not wedge the
+      // queue forever.
+      await this.#reconcileZombieTasks(definition.name, tasks);
+
       const pendingAll = tasks.filter((task) => task.state === "pending");
       if (pendingAll.length === 0) continue;
+
+      const capacity = definition.workers - this.#inFlight(definition.name);
+      if (capacity <= 0) continue;
 
       // Fire-time working-directory validation (scheduler spec D6 style): the
       // queue-level `directory:` is validated once per tick, only when there
@@ -557,32 +576,128 @@ export class QueueController {
     await this.#deleteTask(queueName, taskId);
   }
 
+  /**
+   * Handles a run timeout (cleanup-chain hardening, timeout teardown
+   * spec D3/D4): the chain is wrapped in one top-level try/catch — the timer
+   * callback is a floating promise, so an unexpected throw anywhere would
+   * otherwise break the chain silently. Local steps first (history line,
+   * task-file delete), remote steps last; the release dispatch is
+   * fire-and-forget so a hung/throwing remote step cannot block the local
+   * cleanup that un-wedges the queue (a `running` file stuck mid-chain is
+   * exactly the zombie the tick reconciliation would otherwise have to heal).
+   */
   async #handleTimeout(sessionId: string): Promise<void> {
-    const record = this.#runs.get(sessionId);
-    if (record === undefined) return; // run already ended
-    this.#runs.delete(sessionId);
-    record.probe.stop();
-    const { queueName, taskId, target } = record;
-    this.#logger.warn(
-      `[queue] task "${taskId}" of queue "${queueName}" timed out after ${record.timeoutMs}ms`,
-    );
-    await this.#writeHistory(record, "timeout", {
-      reason: `timed out after ${record.timeoutMs}ms`,
-    });
-    // Abort this run's own session (same core command as the scheduler).
-    await this.#dispatchSafe({
-      type: "command.session.stop",
-      clientSessionId: sessionId,
-    });
-    await this.#deleteTask(queueName, taskId);
+    try {
+      const record = this.#runs.get(sessionId);
+      if (record === undefined) return; // run already ended
+      this.#runs.delete(sessionId);
+      record.probe.stop();
+      const { queueName, taskId, target } = record;
 
-    // The partial transcript is NOT inlined — the kept accumulation file is
-    // referenced by the trailing italic one-liner.
-    const suffix = this.#t("queue.taskTimedOutSuffix", {
-      queue: queueName,
-      path: record.accumulator.filePath,
-    });
-    await this.#deliverToTarget(target, suffix);
+      // Tombstone (timeout teardown spec D4): arm the reconciliation grace
+      // window for the rest of this chain.
+      this.#recordEnd(sessionId);
+
+      this.#logger.warn(
+        `[queue] task "${taskId}" of queue "${queueName}" timed out after ${record.timeoutMs}ms`,
+      );
+
+      // Local fs steps FIRST (history writer never throws — run-history
+      // spec D3; #deleteTask catches its own fs failures), so the worker
+      // slot un-wedges even if everything remote below hangs or throws.
+      await this.#writeHistory(record, "timeout", {
+        reason: `timed out after ${record.timeoutMs}ms`,
+      });
+      await this.#deleteTask(queueName, taskId);
+
+      // The partial transcript is NOT inlined — the kept accumulation file is
+      // referenced by the trailing italic one-liner.
+      const suffix = this.#t("queue.taskTimedOutSuffix", {
+        queue: queueName,
+        path: record.accumulator.filePath,
+      });
+      await this.#deliverToTarget(target, suffix);
+
+      // Fully tear down this run's session (timeout teardown spec D2/D1):
+      // unlike interactive `/stop` (abort-only), release terminates the agent
+      // process so a timed-out run cannot be revived by queued probes.
+      // Deliberately NOT awaited (last, fire-and-forget): #dispatchSafe
+      // already contains throws, and a dispatch that never settles must not
+      // block the cleanup completed above.
+      void this.#dispatchSafe({
+        type: "command.session.release",
+        clientSessionId: sessionId,
+      });
+    } catch (error) {
+      // Top-level net (D3): log loudly instead of a silent floating rejection.
+      this.#logger.error(
+        `[queue] unexpected failure in the timeout handler for run "${sessionId}":`,
+        error,
+      );
+    }
+  }
+
+  /**
+   * Records a run's end time for the reconciliation grace window and prunes
+   * expired tombstones (timeout teardown spec D4). Runs cleared by
+   * `stop()` intentionally get NO tombstone: those files are "in-flight
+   * forgotten" consumed by the next start's at-least-once reset, not zombies.
+   */
+  #recordEnd(sessionId: string): void {
+    this.#endedAt.set(sessionId, Date.now());
+    this.#pruneEndedTombstones();
+  }
+
+  /** Drops tombstones older than the 2×tickMs grace window. */
+  #pruneEndedTombstones(): void {
+    const cutoff = Date.now() - 2 * this.#tickMs;
+    for (const [id, endedAtMs] of this.#endedAt) {
+      if (endedAtMs < cutoff) this.#endedAt.delete(id);
+    }
+  }
+
+  /**
+   * True while a run's normal cleanup chain may still legitimately be between
+   * the registry removal and its task-file delete (timeout teardown spec D4):
+   * ticks and the timeout chain are independent timers and can interleave, so
+   * a `running` file whose run just ended within 2×tickMs is skipped by the
+   * zombie reconciliation.
+   */
+  #recentlyEnded(sessionId: string): boolean {
+    const endedAtMs = this.#endedAt.get(sessionId);
+    return endedAtMs !== undefined && Date.now() - endedAtMs < 2 * this.#tickMs;
+  }
+
+  /**
+   * Zombie-task self-heal (timeout teardown spec D4): within an owned,
+   * enabled, bound queue, a task file still marked `running` with no live run
+   * has lost its run — its cleanup chain died midway (the incident this
+   * heals: a hung remote dispatch stalled the chain after the registry
+   * removal). The file is DELETED with a warn log, deliberately NOT reset to
+   * `pending`: a mid-session zombie proves the run terminated without local
+   * cleanup, so re-running it risks duplicate side effects; the at-least-once
+   * reset remains exclusively the restart flow ({@link #resetRunningTasks},
+   * which also owns files cleared by `stop()` — those get no tombstone).
+   */
+  async #reconcileZombieTasks(queueName: string, tasks: QueueTask[]): Promise<void> {
+    for (const task of tasks) {
+      if (task.state !== "running") continue;
+      const sessionId = `${QUEUE_SESSION_PREFIX}${queueName}:${task.id}`;
+      if (this.#runs.has(sessionId)) continue; // live run — never touched
+      if (this.#recentlyEnded(sessionId)) continue; // grace window (D4)
+      try {
+        await deleteQueueTask(queueName, task.id, this.#queuesRoot);
+      } catch (error) {
+        this.#logger.error(
+          `[queue] failed to delete zombie task "${task.id}" of queue "${queueName}":`,
+          error,
+        );
+        continue;
+      }
+      this.#logger.warn(
+        `[queue] deleted zombie running task "${task.id}" of queue "${queueName}" (no active run for it)`,
+      );
+    }
   }
 
   /** Registers the run (writing its Output File header), its timeout timer, accumulator and silence probe; `null` when stopped (SF-2). */
@@ -712,6 +827,10 @@ export class QueueController {
     clearTimeout(record.timer);
     record.probe.stop();
     this.#runs.delete(sessionId);
+    // Tombstone (timeout teardown spec D4): arm the reconciliation grace
+    // window — the caller's cleanup chain may still be about to delete the
+    // task file.
+    this.#recordEnd(sessionId);
   }
 
   /**

@@ -264,6 +264,11 @@ export class GatewayCore {
       return { ok: true };
     }
 
+    if (event.type === "command.session.release") {
+      await this.#handleSessionRelease(event.clientSessionId);
+      return { ok: true };
+    }
+
     if (event.type === "command.session.status") {
       await this.#handleSessionStatus(event.clientSessionId);
       return { ok: true };
@@ -459,6 +464,27 @@ export class GatewayCore {
     }
 
     await runtime.agentAdapter.abort();
+  }
+
+  /**
+   * Full teardown of the session's agent runtime (timeout teardown spec D1):
+   * routes the session through the mature `#stopRuntime` path — abort +
+   * `adapter.stop()` (process termination), runtime removal, state-handle
+   * revocation and, for synthetic sessions, deletion of the persisted record
+   * (SF-1). Deliberately unlike `#handleSessionStop`, a missing runtime is an
+   * idempotent no-op with only a debug log and nothing delivered to the
+   * session — the synthesized release events come from the queue/scheduler
+   * controllers, whose synthetic sessions have no reader on the IM side.
+   */
+  async #handleSessionRelease(clientSessionId: string): Promise<void> {
+    const agentSessionId = this.#clientToAgentSession.get(clientSessionId);
+    const runtime =
+      agentSessionId !== undefined ? this.#agentRuntimes.get(agentSessionId) : undefined;
+    if (!runtime) {
+      this.#logger.debug(`no active runtime to release for ${clientSessionId}; no-op`);
+      return;
+    }
+    await this.#stopRuntime(runtime);
   }
 
   async #handleSessionStatus(clientSessionId: string): Promise<void> {

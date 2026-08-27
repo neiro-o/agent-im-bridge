@@ -102,6 +102,15 @@ ownership rule as the scheduler).
   (`IngressResult.ok === false` for either `session.new` or the follow-up
   `user.message`), a runtime `error` event, or a timeout → end the run,
   deliver a failure notice to `target`, delete the task file, end the run.
+  A timeout additionally tears down the run's agent session via
+  `command.session.release` (process terminated, not just turn-aborted — a
+  timed-out agent cannot revive on queued probe messages). The timeout chain
+  itself is hang/throw-hardened (timeout teardown spec D3): the whole body
+  sits in one top-level try/catch (the timer callback is a floating promise —
+  no silent breakage), local fs steps first (history line, task-file delete)
+  and remote steps last, with the release dispatch fired and NOT awaited
+  (`void #dispatchSafe(...)`) so a permanently hung dispatch cannot block the
+  local cleanup.
   No retry, no head-of-line blocking; to re-run, insert again. The failure
   notice carries the real reason (`❌ Queue "<queue>" · task <taskId>
   failed: <reason>`) for dispatch failures and runtime errors; a timeout
@@ -113,6 +122,22 @@ ownership rule as the scheduler).
 - **Stop**: in-flight runs are forgotten; their task files stay `running`
   and are re-enqueued at the next start. No delivery after stop (same
   contract as the scheduler).
+- **Zombie-task self-heal (timeout teardown spec D4)**: when a cleanup chain
+  dies midway (e.g. the timeout chain hung before its task-file delete), the
+  task file would previously stay `running` forever — with `workers=1` this
+  fakes occupancy until a bridge restart (`#resetRunningTasks`). Now every
+  tick reconciles each owned, enabled, bound queue: a task file marked
+  `running` with no live run in the registry is a zombie → DELETED with a
+  warn log, deliberately NOT reset to `pending` (a mid-session zombie proves
+  the run terminated without finishing; re-running risks duplicate side
+  effects). Race safety against an interleaving healthy cleanup chain
+  (ticks and timeout timers are independent chains): runs record a tombstone
+  timestamp when they end (`#endRun`/`#handleTimeout`; runs cleared by
+  `stop()` get none — those files belong to the next start's at-least-once
+  reset), and the reconciliation skips runs ended within the last 2×tickMs.
+  Tombstones are pruned every tick. Ownership filtering matches fire:
+  disabled/unbound/foreign queues are untouched; their zombies are healed
+  once they become consumable again.
 
 ## D3 — Core changes
 
