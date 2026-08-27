@@ -21,6 +21,30 @@ describe("feishuClientModule config collector", () => {
     ).not.toThrow();
   });
 
+  it("requires a fail-closed allowlist and roots when local control is enabled", () => {
+    const collector = feishuClientModule.createConfigCollector?.();
+    expect(() =>
+      collector!.validate({
+        appId: "cli_xxx",
+        appSecret: "secret",
+        localControl: { enabled: true },
+      }),
+    ).toThrow("allowedClientSessionIds");
+
+    expect(() =>
+      collector!.validate({
+        appId: "cli_xxx",
+        appSecret: "secret",
+        localControl: {
+          enabled: true,
+          allowedClientSessionIds: ["feishu:dm:oc_owner"],
+          defaultWorkingDirectory: "/workspace",
+          allowedFileRoots: ["/workspace"],
+        },
+      }),
+    ).not.toThrow();
+  });
+
   it("rejects invalid domain", () => {
     const collector = feishuClientModule.createConfigCollector?.();
     expect(() =>

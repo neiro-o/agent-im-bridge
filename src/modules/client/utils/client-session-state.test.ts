@@ -5,11 +5,15 @@ describe("imClientSessionStateCodec", () => {
   it("decodes a full state document", () => {
     expect(
       imClientSessionStateCodec.decode(
-        { version: 1, defaultWorkingDirectory: "/tmp/a" },
+        { version: 1, defaultWorkingDirectory: "/tmp/a", sshWorkingDirectory: "/tmp/shell" },
         1,
         { clientSessionId: "client-1" },
       ),
-    ).toEqual({ version: 1, defaultWorkingDirectory: "/tmp/a" });
+    ).toEqual({
+      version: 1,
+      defaultWorkingDirectory: "/tmp/a",
+      sshWorkingDirectory: "/tmp/shell",
+    });
   });
 
   it("decodes a minimal state document", () => {
@@ -46,8 +50,16 @@ describe("imClientSessionStateCodec", () => {
   it("encodes the canonical plain shape", () => {
     expect(imClientSessionStateCodec.encode({ version: 1 })).toEqual({ version: 1 });
     expect(
-      imClientSessionStateCodec.encode({ version: 1, defaultWorkingDirectory: "/tmp/a" }),
-    ).toEqual({ version: 1, defaultWorkingDirectory: "/tmp/a" });
+      imClientSessionStateCodec.encode({
+        version: 1,
+        defaultWorkingDirectory: "/tmp/a",
+        sshWorkingDirectory: "/tmp/shell",
+      }),
+    ).toEqual({
+      version: 1,
+      defaultWorkingDirectory: "/tmp/a",
+      sshWorkingDirectory: "/tmp/shell",
+    });
   });
 
   it("rejects invalid states at encode time", () => {

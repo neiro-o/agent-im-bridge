@@ -28,6 +28,7 @@ import {
   type ImClientSessionStateV1,
 } from "../../utils/client-session-state";
 import { renderStatusMarkdown } from "../../utils/status-markdown";
+import { ChatModeController, normalizeChatModeConfig, type LocalAction } from "../../modes/chat-mode-controller";
 import { FeishuClient } from "./feishu-client";
 import { buildFeishuSessionId, parseFeishuSessionId } from "./feishu-session";
 
@@ -70,6 +71,7 @@ export class FeishuIMAdapter implements IMAdapter {
   readonly #sessionState: ClientSessionStateStore<ImClientSessionStateV1>;
   readonly #onScheduleRun: OnScheduleRun | undefined;
   readonly #onScheduleHere: OnScheduleHere | undefined;
+  readonly #modeController: ChatModeController | null;
   #onOutput: ((event: ClientOutputEvent) => Promise<void> | void) | null = null;
   #client: FeishuClient | null = null;
   #egressQueue: ClientInputEvent[] = [];
@@ -129,12 +131,28 @@ export class FeishuIMAdapter implements IMAdapter {
     this.#sessionState = sessionState;
     this.#onScheduleRun = onScheduleRun;
     this.#onScheduleHere = onScheduleHere;
+    this.#modeController = config.localControl
+      ? new ChatModeController({
+          config: normalizeChatModeConfig(config.localControl),
+          loadWorkingDirectory: async (clientSessionId) =>
+            (await this.#sessionState.session(clientSessionId).read())?.sshWorkingDirectory,
+          saveWorkingDirectory: async (clientSessionId, cwd) => {
+            await this.#sessionState.session(clientSessionId).update((current) => ({
+              version: 1,
+              ...(current?.defaultWorkingDirectory
+                ? { defaultWorkingDirectory: current.defaultWorkingDirectory }
+                : {}),
+              sshWorkingDirectory: cwd,
+            }));
+          },
+        })
+      : null;
   }
 
   async start(onOutput: (event: ClientOutputEvent) => Promise<void> | void): Promise<void> {
     this.#onOutput = onOutput;
     this.#client = new FeishuClient(this.#config, this.#logger);
-    this.#client.setOnMessage(async ({ chatId, chatType, text, messageId, mentionedBot }) => {
+    this.#client.setOnMessage(async ({ chatId, chatType, text, messageId, mentionedBot, attachments }) => {
       if (!this.#onOutput) {
         this.#logger.warn(`dropping inbound message, adapter not ready (chatId=${chatId})`);
         return;
@@ -153,6 +171,29 @@ export class FeishuIMAdapter implements IMAdapter {
       this.#lastInboundMessageIdBySession.set(clientSessionId, messageId);
       this.#resetProgressState(clientSessionId);
       await this.#client?.startTyping(chatId, messageId);
+
+      if (this.#modeController) {
+        try {
+          const actions = await this.#modeController.handle({
+            clientSessionId,
+            chatType,
+            text,
+            attachments,
+          });
+          if (!(actions.length === 1 && actions[0].type === "forward")) {
+            for (const action of actions) {
+              await this.#executeLocalAction(action, chatId, messageId);
+            }
+            await this.#client?.stopTyping(chatId);
+            return;
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          await this.#client?.sendText(chatId, `SSH 模式操作失败：${detail}`, messageId);
+          await this.#client?.stopTyping(chatId);
+          return;
+        }
+      }
 
       const helpMarkdown = resolveHelpMarkdown(normalizedText, this.#t);
       if (helpMarkdown) {
@@ -217,6 +258,7 @@ export class FeishuIMAdapter implements IMAdapter {
 
   async stop(): Promise<void> {
     this.#egressQueue.length = 0;
+    await this.#modeController?.stop();
     if (this.#client) {
       await this.#client.disconnect();
       this.#client = null;
@@ -303,6 +345,25 @@ const replyToMessageId = this.#lastInboundMessageIdBySession.get(event.clientSes
       }
     } finally {
       this.#processing = false;
+    }
+  }
+
+  async #executeLocalAction(action: LocalAction, chatId: string, messageId: string): Promise<void> {
+    if (!this.#client) return;
+    if (action.type === "reply") {
+      await this.#client.sendText(chatId, action.text, messageId);
+      return;
+    }
+    if (action.type === "attachment") {
+      try {
+        await this.#client.sendAttachment(chatId, {
+          kind: "file",
+          filePath: action.filePath,
+          fileName: action.fileName,
+        }, messageId);
+      } finally {
+        await action.cleanup?.();
+      }
     }
   }
 

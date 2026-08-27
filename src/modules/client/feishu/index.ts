@@ -45,6 +45,30 @@ function createFeishuConfigCollector(): ConfigAdapter<FeishuClientConfig> {
       if (config.domain && !["feishu", "lark"].includes(config.domain)) {
         throw new Error("Feishu domain must be feishu or lark");
       }
+      const localControl = config.localControl;
+      if (localControl?.enabled) {
+        if (!Array.isArray(localControl.allowedClientSessionIds) || localControl.allowedClientSessionIds.length === 0) {
+          throw new Error("Feishu localControl requires a non-empty allowedClientSessionIds allowlist");
+        }
+        for (const sessionId of localControl.allowedClientSessionIds) {
+          parseFeishuSessionId(sessionId);
+        }
+        if (!localControl.defaultWorkingDirectory?.trim()) {
+          throw new Error("Feishu localControl defaultWorkingDirectory is required");
+        }
+        if (!Array.isArray(localControl.allowedFileRoots) || localControl.allowedFileRoots.length === 0) {
+          throw new Error("Feishu localControl requires at least one allowedFileRoot");
+        }
+        for (const [name, value] of [
+          ["shellTimeoutMs", localControl.shellTimeoutMs],
+          ["maxShellOutputBytes", localControl.maxShellOutputBytes],
+          ["maxTransferBytes", localControl.maxTransferBytes],
+        ] as const) {
+          if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+            throw new Error(`Feishu localControl ${name} must be a positive integer`);
+          }
+        }
+      }
     },
 
     summarize(config) {

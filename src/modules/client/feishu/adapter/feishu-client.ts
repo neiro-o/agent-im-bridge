@@ -1,9 +1,16 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createLogger, type Logger } from "../../../../core/logger";
-import type { FeishuClientConfig, FeishuInboundMessage, OutboundAttachment } from "../../../../types";
+import type {
+  FeishuClientConfig,
+  FeishuInboundMessage,
+  InboundAttachment,
+  OutboundAttachment,
+} from "../../../../types";
 
 const DEDUP_TTL_MS = 12 * 60 * 60 * 1000;
 const DEDUP_MAX_ENTRIES = 5000;
@@ -126,7 +133,10 @@ export class FeishuClient {
   async connect(): Promise<void> {
     this.#unsubscribe = [
       this.#channel.on("message", (message) => {
-        void this.#handleMessage(message);
+        void this.#handleMessage(message).catch((error) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          this.#logger.error(`failed to handle inbound message: ${detail}`);
+        });
       }),
       this.#channel.on("reject", (event) => {
         this.#logger.debug(
@@ -201,42 +211,64 @@ export class FeishuClient {
     fileKey: string,
     resourceType: string,
     fileName?: string,
-  ): Promise<string | null> {
+  ): Promise<InboundAttachment> {
+    const kind: InboundAttachment["kind"] =
+      resourceType === "image" || resourceType === "audio" || resourceType === "video"
+        ? resourceType
+        : "file";
+    const displayName = fileName && fileName.trim().length > 0 ? basename(fileName) : undefined;
     try {
       const resp = await this.#client.im.messageResource.get({
         path: { message_id: messageId, file_key: fileKey },
-        params: { type: resourceType },
+        params: { type: resourceType === "image" ? "image" : "file" },
       });
-      if (!resp) return null;
+      if (!resp) {
+        return { kind, fileName: displayName, downloadError: { message: "Feishu returned an empty resource" } };
+      }
 
       const ext = resourceType === "image" ? ".png" : resourceType === "audio" ? ".ogg" : "";
-      const safeName =
-        fileName && fileName.length > 0 ? fileName.replace(/[^a-zA-Z0-9._-]/g, "_") : `${fileKey}${ext}`;
+      const localName = `${randomUUID()}${displayName ? `-${displayName.replace(/[^a-zA-Z0-9._-]/g, "_")}` : ext}`;
       const dir = join(tmpdir(), "agent-bridge-feishu-media");
       if (!existsSync(dir)) {
         mkdirSync(dir, { recursive: true });
       }
-      const localPath = join(dir, `${Date.now()}-${safeName}`);
+      const localPath = join(dir, localName);
 
       if (typeof resp.writeFile === "function") {
         await resp.writeFile(localPath);
-        return localPath;
-      }
-
-      if (typeof resp.getReadableStream === "function") {
+      } else if (typeof resp.getReadableStream === "function") {
         const chunks: Buffer[] = [];
         for await (const chunk of resp.getReadableStream()) {
           chunks.push(Buffer.from(chunk));
         }
         writeFileSync(localPath, Buffer.concat(chunks));
-        return localPath;
+      } else {
+        return {
+          kind,
+          fileName: displayName,
+          downloadError: { message: "Feishu resource cannot be read" },
+        };
       }
 
-      this.#logger.warn(`resource response had neither writeFile nor getReadableStream (fileKey=${fileKey})`);
-      return null;
+      const info = await stat(localPath);
+      return { kind, localPath, fileName: displayName ?? basename(localPath), sizeBytes: info.size };
     } catch (error) {
-      this.#logger.error(`failed to download resource (fileKey=${fileKey}):`, error);
-      return null;
+      const candidate = error as { code?: unknown; response?: { data?: { code?: unknown } } };
+      const code = candidate.response?.data?.code ?? candidate.code;
+      const message = code === 99991672
+        ? "Feishu app lacks the im:message:readonly application permission; grant it and publish a new app version."
+        : error instanceof Error ? error.message : String(error);
+      this.#logger.error(
+        `failed to download resource (fileKey=${fileKey.slice(0, 8)} code=${String(code ?? "unknown")})`,
+      );
+      return {
+        kind,
+        fileName: displayName,
+        downloadError: {
+          ...(typeof code === "string" || typeof code === "number" ? { code } : {}),
+          message,
+        },
+      };
     }
   }
 
@@ -357,16 +389,18 @@ export class FeishuClient {
     }
 
     let text = message.content ?? "";
+    const attachments: InboundAttachment[] = [];
     for (const resource of message.resources) {
       if (resource.type === "sticker") continue;
-      const localPath = await this.downloadResource(
+      const attachment = await this.downloadResource(
         message.messageId,
         resource.fileKey,
         resource.type,
         resource.fileName,
       );
-      if (localPath) {
-        text += `\n[Received ${resource.type}: ${localPath}]`;
+      attachments.push(attachment);
+      if (attachment.localPath) {
+        text += `\n[Received ${resource.type}: ${attachment.localPath}]`;
       }
     }
 
@@ -376,6 +410,7 @@ export class FeishuClient {
       messageId: message.messageId,
       text,
       mentionedBot: message.mentionedBot,
+      ...(attachments.length > 0 ? { attachments } : {}),
       raw: message.raw,
     });
   }

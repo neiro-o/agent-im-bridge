@@ -15,6 +15,8 @@ export interface ImClientSessionStateV1 {
    * this chat. Used as the default for a later bare `/new`.
    */
   defaultWorkingDirectory?: string;
+  /** Last canonical cwd used by the authorized Feishu SSH mode. */
+  sshWorkingDirectory?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -47,10 +49,21 @@ export const imClientSessionStateCodec: ClientSessionStateCodec<ImClientSessionS
         "invalid IM client session state: defaultWorkingDirectory must be a non-empty string when present",
       );
     }
+    if (
+      raw.sshWorkingDirectory !== undefined &&
+      (typeof raw.sshWorkingDirectory !== "string" || raw.sshWorkingDirectory.length === 0)
+    ) {
+      throw new Error(
+        "invalid IM client session state: sshWorkingDirectory must be a non-empty string when present",
+      );
+    }
     return {
       version: 1,
       ...(typeof raw.defaultWorkingDirectory === "string"
         ? { defaultWorkingDirectory: raw.defaultWorkingDirectory }
+        : {}),
+      ...(typeof raw.sshWorkingDirectory === "string"
+        ? { sshWorkingDirectory: raw.sshWorkingDirectory }
         : {}),
     };
   },
@@ -69,10 +82,21 @@ export const imClientSessionStateCodec: ClientSessionStateCodec<ImClientSessionS
         "invalid IM client session state: defaultWorkingDirectory must be a non-empty string when present",
       );
     }
+    if (
+      state.sshWorkingDirectory !== undefined &&
+      (typeof state.sshWorkingDirectory !== "string" || state.sshWorkingDirectory.length === 0)
+    ) {
+      throw new Error(
+        "invalid IM client session state: sshWorkingDirectory must be a non-empty string when present",
+      );
+    }
     return {
       version: 1,
       ...(state.defaultWorkingDirectory !== undefined
         ? { defaultWorkingDirectory: state.defaultWorkingDirectory }
+        : {}),
+      ...(state.sshWorkingDirectory !== undefined
+        ? { sshWorkingDirectory: state.sshWorkingDirectory }
         : {}),
     };
   },

@@ -394,6 +394,19 @@ export interface AgentModule<TConfig = unknown, TState extends object = Record<s
   }): Promise<AgentAdapter>;
 }
 
+export interface LocalControlConfig {
+  enabled?: boolean;
+  allowedClientSessionIds?: string[];
+  allowGroupChats?: boolean;
+  defaultWorkingDirectory?: string;
+  allowedFileRoots?: string[];
+  shellTimeoutMs?: number;
+  maxShellOutputBytes?: number;
+  maxTransferBytes?: number;
+  overwriteUploads?: boolean;
+  uploadSingleShot?: boolean;
+}
+
 export interface FeishuClientConfig {
   appId: string;
   appSecret: string;
@@ -401,6 +414,7 @@ export interface FeishuClientConfig {
   encryptKey?: string;
   verificationToken?: string;
   requireMentionInGroup?: boolean;
+  localControl?: LocalControlConfig;
 }
 
 export interface WecomClientConfig {
@@ -703,12 +717,25 @@ export interface RunChannelOptions {
   defaults: AppDefaults;
 }
 
+export interface InboundAttachment {
+  kind: "image" | "file" | "audio" | "video";
+  localPath?: string;
+  fileName?: string;
+  sizeBytes?: number;
+  mimeType?: string;
+  downloadError?: {
+    code?: string | number;
+    message: string;
+  };
+}
+
 export interface FeishuInboundMessage {
   chatId: string;
   chatType: "p2p" | "group";
   messageId: string;
   text: string;
   mentionedBot?: boolean;
+  attachments?: InboundAttachment[];
   raw?: unknown;
 }
 
