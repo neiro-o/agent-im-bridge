@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [commit-and-tag-version](https://github.com/absolute-version/commit-and-tag-version) for commit guidelines.
 
+## [0.8.7](https://github.com/HoPGoldy/agent-bridge/compare/v0.8.6...v0.8.7) (2026-08-27)
+
+
+### Features
+
+* **queue,schedule:** timeout teardown kills the agent process; hang-proof cleanup chain with zombie self-heal ([bf7ee35](https://github.com/HoPGoldy/agent-bridge/commit/bf7ee35e860ddbce2601db97f1b67f520ac76290))
+* **queue:** per-queue and per-task working directory (`directory:`) ([d4515ad](https://github.com/HoPGoldy/agent-bridge/commit/d4515add088eaeb199a898762eb79723bbed8308))
+
 ## [0.8.6](https://github.com/HoPGoldy/agent-bridge/compare/v0.8.5...v0.8.6) (2026-08-25)
 
 
