@@ -21,22 +21,38 @@ describe("resolveHelpMarkdown", () => {
     const en = getTranslator("en-US");
     const zh = getTranslator("zh-CN");
 
-    expect(resolveHelpMarkdown("/help", en)).toContain("Available commands:");
-    expect(resolveHelpMarkdown("/h", en)).toContain("/stop");
-    expect(resolveHelpMarkdown("/H", zh)).toContain("可用命令：");
-    expect(resolveHelpMarkdown("/HELP", zh)).toContain("查看这条帮助信息");
+    expect(resolveHelpMarkdown("/help", en)).toContain("## Available commands");
+    expect(resolveHelpMarkdown("/h", en)).toContain("| Bridge | `/stop`");
+    expect(resolveHelpMarkdown("/H", zh)).toContain("## 可用命令");
+    expect(resolveHelpMarkdown("/HELP", zh)).toContain("显示此命令表格");
   });
 
   it("documents /schedule-run and /schedule-here in the help text", () => {
     const en = getTranslator("en-US");
     const zh = getTranslator("zh-CN");
 
-    expect(resolveHelpMarkdown("/help", en)).toContain("/schedule-run <task-name>");
-    expect(resolveHelpMarkdown("/help", zh)).toContain("/schedule-run <任务名>");
-    expect(resolveHelpMarkdown("/help", en)).toContain("/schedule-here <task-name>");
-    expect(resolveHelpMarkdown("/help", zh)).toContain("/schedule-here <任务名>");
-    expect(resolveHelpMarkdown("/help", en)).toContain("/effort [level]");
-    expect(resolveHelpMarkdown("/help", zh)).toContain("/thinking [等级]");
+    expect(resolveHelpMarkdown("/help", en)).toContain("/schedule-run <task>");
+    expect(resolveHelpMarkdown("/help", zh)).toContain("/schedule-run <task>");
+    expect(resolveHelpMarkdown("/help", en)).toContain("/schedule-here <task>");
+    expect(resolveHelpMarkdown("/help", zh)).toContain("/schedule-here <task>");
+    expect(resolveHelpMarkdown("/help", en)).not.toContain("/effort [level]");
+
+    const agentHelp = resolveHelpMarkdown("/help", zh, {
+      agentCommands: [{
+        name: "effort",
+        aliases: ["thinking"],
+        argumentHint: "[level]",
+        description: "查看思考等级。",
+        scope: "runtime",
+        requiresActiveSession: true,
+      }],
+    });
+    expect(agentHelp).toContain("/effort [level]");
+    expect(agentHelp).toContain("`/thinking`");
+
+    const localHelp = resolveHelpMarkdown("/help", zh, { includeLocalControl: true });
+    expect(localHelp).toContain("/upload-cancel");
+    expect(localHelp).toContain("/download <path-or-pattern>");
   });
 
   it("returns null for non-help text", () => {
@@ -253,7 +269,11 @@ describe("parseSlashCommand", () => {
   it("returns null for unrecognized command-like text", () => {
     expect(parseSlashCommand("/help", "session-1")).toBeNull();
     expect(parseSlashCommand("/h", "session-1")).toBeNull();
-    expect(parseSlashCommand("/compact please", "session-1")).toBeNull();
+    expect(parseSlashCommand("/compact please", "session-1")).toEqual({
+      type: "command.session.compact",
+      clientSessionId: "session-1",
+      customInstructions: "please",
+    });
     expect(parseSlashCommand("/status now", "session-1")).toBeNull();
     expect(parseSlashCommand("hello /model anthropic/claude-sonnet-4-5", "session-1")).toBeNull();
     expect(parseSlashCommand("-n", "session-1")).toBeNull();

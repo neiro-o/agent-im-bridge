@@ -1,35 +1,32 @@
 # Command System
 
-`agent-bridge` keeps the IM-side command surface intentionally small.
-
-All client adapters use the same command parser, so the command behavior is consistent across:
-
-- Feishu / Lark
-- WeCom
-- Weixin
+`agent-bridge` keeps common lifecycle parsing consistent across Feishu/Lark, WeCom, and Weixin. Feishu can additionally enable an authorized local-control layer, and each agent backend can expose provider-scoped commands through a capability manifest.
 
 ## Supported commands
 
-| User input | Meaning | Internal event |
-| --- | --- | --- |
-| `/new` | Start a fresh agent session for the current chat (reusing the chat's remembered directory, if any) | `command.session.new` |
-| `/new <path>` | Start a fresh agent session whose working directory is `<path>`, and remember `<path>` as this chat's default | `command.session.new` with `workingDirectory` |
-| `/n` | Alias of `/new` | `command.session.new` |
-| `/n <path>` | Alias of `/new <path>` | `command.session.new` with `workingDirectory` |
-| `/compact` | Ask the current agent session to compact its context | `command.session.compact` |
-| `/c` | Alias of `/compact` | `command.session.compact` |
-| `/stop` | Stop the current in-flight agent run, if the agent supports stopping | `command.session.stop` |
-| `/s` | Alias of `/stop` | `command.session.stop` |
-| `/status` | Query the current agent session runtime status | `command.session.status` |
-| `/st` | Alias of `/status` | `command.session.status` |
-| `/model` | List available models for the current active agent session | `command.session.model.list` |
-| `/m` | Alias of `/model` | `command.session.model.list` or `command.session.model.set` |
-| `/model provider/modelId` | Switch the current active agent session model | `command.session.model.set` |
-| `/effort` | Show the current and available thinking levels | `command.session.effort.get` |
-| `/effort <level>` | Switch the current thinking level | `command.session.effort.set` |
-| `/thinking [level]` | Alias of `/effort [level]` | effort get or set event |
-| `/help` | Show the built-in command help for the current client locale | Local client-side help response |
-| `/h` | Alias of `/help` | Local client-side help response |
+The `/help` response is generated as a copyable Markdown table. Bridge commands are always shown, Feishu local-control commands are shown only for an enabled and authorized chat, and provider commands come from the configured agent module's manifest.
+
+| Scope | User input | Meaning | Routing |
+| --- | --- | --- | --- |
+| Bridge | `/new [path]` (`/n`) | Start a fresh agent session and optionally remember its working directory | `command.session.new` |
+| Bridge | `/compact [instructions]` (`/c`) | Compact context; Pi accepts optional custom instructions | `command.session.compact` |
+| Bridge | `/stop` (`/s`) | Stop the active run | `command.session.stop` |
+| Bridge | `/status` (`/st`) | Query runtime status | `command.session.status` |
+| Bridge | `/model [provider/modelId]` (`/m`) | List or switch models | model list/set events |
+| Automation | `/schedule-run <task>` | Run a scheduled task now | adapter-local callback |
+| Automation | `/schedule-here <task>` | Bind this chat as a task target | adapter-local callback |
+| Automation | `/queue-here <queue>` | Bind this chat as a queue target | core-routed command |
+| Bridge | `/help` (`/h`) | Show the generated command table | local client response |
+| Feishu local control | `/agent`, `/ssh` | Switch Agent/Shell mode | authorized mode controller |
+| Feishu local control | `/upload`, `/upload-cancel` | Manage Shell-mode attachment uploads | authorized mode controller |
+| Feishu local control | `/download <path-or-pattern>` | Send a file or archive from Shell mode | authorized mode controller |
+| Pi | `/effort [level]` (`/thinking`) | Query or switch thinking effort | typed effort event |
+| Pi | `/session`, `/name`, `/commands` | Inspect/name/discover Pi sessions and commands | Pi command provider |
+| Pi | `/steer`, `/follow-up` (`/fu`) | Queue messages during an active Pi run | Pi command provider |
+| Pi | `/clone`, `/fork`, `/resume` | Manage Pi provider sessions | Pi command provider |
+| Pi | `/export`, `/last` | Export session output or resend the last response | Pi command provider |
+| Pi | `/auto-compact`, `/retry`, `/retry-stop` | Control Pi compaction/retry behavior | Pi command provider |
+| Pi | `/model-next`, `/thinking-next`, `/tree` | Cycle runtime settings or inspect the session tree | Pi command provider |
 
 ## How parsing works
 
@@ -37,10 +34,12 @@ The parser is deliberately strict and predictable:
 
 1. The inbound message text is trimmed.
 2. Zero-argument commands must match a supported command exactly.
-3. `/new` and `/n` additionally support an optional argument tail, interpreted as the working directory for the new session.
-4. `/model` and `/m` additionally support a single argument tail, interpreted as the target model string.
-5. `/effort` and `/thinking` accept zero or one whitespace-free level argument. The level name is normalized case-insensitively by the core.
-6. Matching is case-insensitive for the command name. The working directory tail is trimmed of leading/trailing whitespace but otherwise preserved exactly as typed (including case, internal spaces, and Unicode).
+3. `/new` and `/n` support an optional working-directory tail.
+4. `/compact` and `/c` support optional custom instructions. Pi forwards them to RPC; OpenCode reports that custom instructions are unsupported.
+5. `/model` and `/m` support a target-model tail.
+6. `/effort` and `/thinking` accept zero or one whitespace-free level argument. The level name is normalized case-insensitively by the core.
+7. Unknown slash commands remain ordinary messages. Before sending one to the agent, `GatewayCore` consumes it only when the configured provider manifest explicitly declares the command; Pi extension/template/skill commands therefore continue to reach Pi unchanged.
+8. Matching is case-insensitive for command names; argument tails preserve case, spaces, and Unicode.
 
 That means these are valid:
 
@@ -54,6 +53,7 @@ That means these are valid:
 - `/n`
 - `/n /tmp/demo`
 - `/compact`
+- `/compact Focus on code changes`
 - `/c`
 - `/stop`
 - `/s`
@@ -81,7 +81,6 @@ That means these are valid:
 
 And these are **not** treated as commands:
 
-- `/compact now`
 - `/status now`
 - `/help me`
 - `hello /n`
@@ -100,7 +99,7 @@ This avoids accidental command execution when users are just talking naturally, 
 - a command message, or
 - a normal user message
 
-Only `/new`/`/n`, `/model`/`/m`, and `/effort`/`/thinking` accept an argument tail. All other commands must match exactly.
+`/new`/`/n`, `/compact`/`/c`, `/model`/`/m`, and `/effort`/`/thinking` accept argument tails. Provider-scoped commands use the provider manifest and their own validators. Other Bridge lifecycle commands remain exact-match only.
 
 ## Runtime behavior
 
@@ -194,7 +193,7 @@ See [`docs/pi-coding-agent.md`](./pi-coding-agent.md) and [`docs/opencode.md`](.
 
 ### `/compact`
 
-`/compact` and `/c` send a compact request to the current active agent session.
+`/compact` and `/c` send a compact request to the current active agent session. `/compact <instructions>` and `/c <instructions>` also carry custom instructions. Pi forwards those instructions to `compact.customInstructions`; OpenCode explicitly reports that this optional capability is unsupported rather than silently ignoring the text.
 
 If there is no active session yet, the bridge replies with:
 
@@ -251,18 +250,15 @@ Current runtime behavior:
 
 ### `/help`
 
-`/help` and `/h` are handled locally by the client adapter and return a built-in help message in the configured channel language.
+`/help` and `/h` are handled locally by the client adapter and return a localized Markdown table. Command cells use inline-code formatting so they can be copied into the chat; they are not links or buttons and do not execute on click.
 
-This help text currently lists:
+The table is assembled from structured descriptors:
 
-- `/new [path]` (`/n [path]`)
-- `/compact` (`/c`)
-- `/stop` (`/s`)
-- `/status` (`/st`)
-- `/model` (`/m`)
-- `/help` (`/h`)
+- common Bridge and automation commands are always included;
+- Feishu local-control commands appear only when `localControl` is enabled and the current chat is authorized;
+- provider commands come from `AgentModule.getCommandManifest()`, so Pi commands are shown on Pi channels and never appear on OpenCode channels.
 
-Because this is local client-side help, it does **not** create an agent session, does **not** send anything to `GatewayCore`, and does **not** invoke the agent.
+Because help remains client-local, it does **not** create or resume an agent session, send a prompt, or execute provider RPC. Provider command execution itself uses a second routing stage in `GatewayCore`: only commands declared by the configured manifest are consumed, while unknown slash commands continue to the active agent unchanged.
 
 ## Adapter-level note
 

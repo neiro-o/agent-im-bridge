@@ -112,6 +112,74 @@ describe("PiRpcClient", () => {
     await expect(client.getAvailableThinkingLevels()).rejects.toThrow("Invalid thinking levels");
   });
 
+  it("maps enhanced Pi control commands to their RPC protocol shapes", async () => {
+    const commands: Array<Record<string, unknown>> = [];
+    const client = new PiRpcClient({ agentSessionId: "agent-1", piSessionId: "pi-agent-1", sessionDir });
+    vi.mocked(spawn).mockReturnValue(
+      createFakeChild((command) => {
+        commands.push(command);
+        switch (command.type) {
+          case "get_commands": return { commands: [{ name: "review", source: "prompt", description: "Review" }] };
+          case "get_fork_messages": return { messages: [{ entryId: "entry-1", text: "hello" }] };
+          case "clone":
+          case "fork":
+          case "switch_session": return { cancelled: false };
+          case "export_html": return { path: "/tmp/export.html" };
+          case "get_last_assistant_text": return { text: "last" };
+          case "cycle_model": return { model: { provider: "p", id: "m" }, thinkingLevel: "high" };
+          case "cycle_thinking_level": return { level: "xhigh" };
+          case "get_tree": return { tree: [], leafId: null };
+          default: return undefined;
+        }
+      }) as never,
+    );
+
+    await client.start();
+    await expect(client.getCommands()).resolves.toMatchObject([{ name: "review", source: "prompt" }]);
+    await client.steer("now");
+    await client.followUp("later");
+    await expect(client.getForkMessages()).resolves.toEqual([{ entryId: "entry-1", text: "hello" }]);
+    await expect(client.clone()).resolves.toEqual({ cancelled: false });
+    await expect(client.fork("entry-1")).resolves.toMatchObject({ cancelled: false });
+    await expect(client.switchSession("/tmp/session.jsonl")).resolves.toEqual({ cancelled: false });
+    await expect(client.exportHtml()).resolves.toBe("/tmp/export.html");
+    await expect(client.getLastAssistantText()).resolves.toBe("last");
+    await client.setAutoCompaction(true);
+    await client.setAutoRetry(false);
+    await client.abortRetry();
+    await expect(client.cycleModel()).resolves.toMatchObject({ model: { provider: "p", id: "m" } });
+    await expect(client.cycleThinkingLevel()).resolves.toBe("xhigh");
+    await expect(client.getTree()).resolves.toEqual({ tree: [], leafId: null });
+
+    expect(commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "steer", message: "now" }),
+      expect.objectContaining({ type: "follow_up", message: "later" }),
+      expect.objectContaining({ type: "fork", entryId: "entry-1" }),
+      expect.objectContaining({ type: "switch_session", sessionPath: "/tmp/session.jsonl" }),
+      expect.objectContaining({ type: "set_auto_compaction", enabled: true }),
+      expect.objectContaining({ type: "set_auto_retry", enabled: false }),
+      expect.objectContaining({ type: "abort_retry" }),
+    ]));
+  });
+
+  it("restores a provider session file with --session instead of --session-id", async () => {
+    const sessionPath = path.join(sessionDir, "session.jsonl");
+    const client = new PiRpcClient({
+      agentSessionId: "agent-1",
+      piSessionId: "pi-agent-1",
+      sessionPath,
+      sessionDir,
+    });
+    vi.mocked(spawn).mockReturnValue(createFakeChild() as never);
+
+    await client.start();
+
+    const args = vi.mocked(spawn).mock.calls[0][1] as string[];
+    expect(args).toContain("--session");
+    expect(args).toContain(sessionPath);
+    expect(args).not.toContain("--session-id");
+  });
+
   it("spawns the pi process with the configured cwd", async () => {
     const cwd = "/tmp/normalized-workspace";
     const client = new PiRpcClient({

@@ -34,6 +34,7 @@ export type ClientOutputEvent =
   | {
       type: "command.session.compact";
       clientSessionId: string;
+      customInstructions?: string;
     }
   | {
       type: "command.session.stop";
@@ -83,6 +84,7 @@ export type AgentInputEvent =
     }
   | {
       type: "command.session.compact";
+      customInstructions?: string;
     };
 
 export interface OutboundAttachment {
@@ -90,6 +92,8 @@ export interface OutboundAttachment {
   filePath: string;
   fileName?: string;
   caption?: string;
+  /** Delete this bridge-created temporary file after the IM upload settles. */
+  cleanupAfterSend?: boolean;
 }
 
 export interface AgentSessionStatus {
@@ -108,6 +112,43 @@ export interface AgentAvailableModel {
   provider: string;
   modelId: string;
   isCurrent: boolean;
+}
+
+export interface AgentCommandDescriptor {
+  name: string;
+  aliases?: string[];
+  description: string;
+  argumentHint?: string;
+  scope: "session" | "runtime";
+  requiresActiveSession: boolean;
+}
+
+export interface AgentCommandInvocation {
+  name: string;
+  rawArgs: string;
+}
+
+export interface AgentCommandContext {
+  clientSessionId: string;
+  agentSessionId: string;
+}
+
+export type AgentCommandResult =
+  | {
+      handled: true;
+      messages?: Array<{
+        text?: string;
+        attachments?: OutboundAttachment[];
+      }>;
+    }
+  | { handled: false };
+
+export interface AgentCommandProvider {
+  listCommands(): Promise<AgentCommandDescriptor[]> | AgentCommandDescriptor[];
+  executeCommand(
+    invocation: AgentCommandInvocation,
+    context: AgentCommandContext,
+  ): Promise<AgentCommandResult>;
 }
 
 type ToolProgressPayload = {
@@ -209,6 +250,7 @@ export interface AgentAdapter {
   setModel?(target: string): Promise<{ provider: string; modelId: string }>;
   getAvailableThinkingLevels?(): Promise<string[]>;
   setThinkingLevel?(level: string): Promise<void>;
+  getCommandProvider?(): AgentCommandProvider;
   input(event: AgentInputEvent): Promise<void>;
 }
 
@@ -328,6 +370,8 @@ export interface ClientModule<TConfig = unknown, TState extends object = Record<
      * `target` field. Optional: adapters must degrade gracefully when absent.
      */
     onScheduleHere?: OnScheduleHere;
+    /** Provider-scoped commands shown by the local `/help` renderer. */
+    agentCommands?: AgentCommandDescriptor[];
   }): IMAdapter;
 }
 
@@ -339,6 +383,8 @@ export interface AgentModule<TConfig = unknown, TState extends object = Record<s
    * handle in create/resume and keep its state JSON-compatible and versioned.
    */
   readonly sessionStateCodec: AgentSessionStateCodec<TState>;
+  /** Static, provider-scoped command catalog used for routing and `/help`. */
+  getCommandManifest?(common: ChannelCommonContext): AgentCommandDescriptor[];
   createConfigCollector?: () => ConfigAdapter<TConfig>;
   createAgentSession(args: {
     config: TConfig;

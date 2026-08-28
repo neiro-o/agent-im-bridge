@@ -32,6 +32,7 @@ export interface FileTransferServiceOptions {
   pathPolicy: PathPolicy;
   maxTransferBytes?: number;
   tempDirectory?: string;
+  overwriteUploads?: boolean;
   /** Override archive creation in tests or deployments with a platform tool. */
   createArchive?: (files: ArchiveFile[], outputPath: string) => Promise<void>;
 }
@@ -46,12 +47,14 @@ export class FileTransferService {
   readonly #policy: PathPolicy;
   readonly #maxBytes: number;
   readonly #tempDirectory: string;
+  readonly #overwriteUploads: boolean;
   readonly #createArchive: (files: ArchiveFile[], outputPath: string) => Promise<void>;
 
   constructor(options: FileTransferServiceOptions) {
     this.#policy = options.pathPolicy;
     this.#maxBytes = options.maxTransferBytes ?? DEFAULT_MAX_TRANSFER_BYTES;
     this.#tempDirectory = options.tempDirectory ?? os.tmpdir();
+    this.#overwriteUploads = options.overwriteUploads ?? false;
     this.#createArchive = options.createArchive ?? createTarGz;
   }
 
@@ -65,7 +68,10 @@ export class FileTransferService {
       if (!info.isFile()) throw new PathPolicyError("attachment is not a regular file");
       if (info.size > this.#maxBytes) throw new PathPolicyError(`attachment exceeds ${this.#maxBytes} bytes`);
       const name = sanitizeBasename(attachment.fileName ?? path.basename(source));
-      const destination = await this.#availableDestination(target, name);
+      const destination = this.#overwriteUploads
+        ? path.join(target, name)
+        : await this.#availableDestination(target, name);
+      await this.#policy.assertAllowed(target);
       // copyFile is deliberately used instead of rename: a failed upload or a
       // later cleanup must never remove the adapter's temporary source.
       await copyFile(source, destination);

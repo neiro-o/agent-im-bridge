@@ -112,6 +112,33 @@ PI configuration remains owned by PI. Files such as `~/.pi/agent/settings.json`,
 
 `/effort` (alias `/thinking`) operates only on an existing active PI session. The bridge queries PI's `get_available_thinking_levels` RPC for every query or change, so the valid values follow the current provider/model rather than a bridge-wide static list. A model switch can therefore change the available levels. `/effort` never creates or resumes a session implicitly.
 
+### Pi enhanced commands
+
+Pi channels publish the following provider-scoped commands in `/help`; OpenCode channels do not expose or route them:
+
+| Command | Behavior |
+| --- | --- |
+| `/session` | Combines `get_state` and `get_session_stats` into a detailed session table. |
+| `/name <name>` | Sets a non-empty session name (1–200 characters). Pi does not support clearing it with an empty name. |
+| `/commands` | Combines Bridge Pi controls with RPC-discovered extensions, prompt templates, and skills. |
+| `/steer <message>` | Queues a steering message during an active run. |
+| `/follow-up <message>` (`/fu`) | Queues work after the active run settles. |
+| `/clone` | Clones the current branch and persists the new provider session ID/file. |
+| `/fork [entry-id]` | Lists stable fork points or forks at a user-message entry. |
+| `/resume [session-id\|path]` | Lists or switches sessions; paths are restricted to the configured `sessionDir`. |
+| `/export [path]` | Exports HTML. A no-argument temporary export is deleted after the IM upload settles; an explicit path is retained. |
+| `/last [file]` | Resends the last assistant text or sends a temporary `.txt` attachment. |
+| `/auto-compact [on\|off]` | Queries or changes automatic compaction. |
+| `/retry <on\|off>` / `/retry-stop` | Changes automatic retry or aborts its current wait. |
+| `/model-next` / `/thinking-next` | Cycles the Pi model or thinking level. |
+| `/tree [page]` | Shows a capped, paginated, read-only session tree. |
+
+`/compact <instructions>` is a Bridge command with a Pi-specific optional capability: custom instructions are forwarded as `compact.customInstructions`.
+
+Unknown slash commands are not consumed by this provider layer. They continue to PI unchanged, preserving extension, prompt-template, and skill commands. If an extension requests an unsupported interactive UI dialog, the bridge sends a cancelled `extension_ui_response` instead of leaving the PI RPC process blocked.
+
+Session-switching commands are rejected while a run is active. After `/clone`, `/fork`, or `/resume`, the adapter persists PI's authoritative provider session ID and JSONL path without changing the Core-owned agent session ID, so an idle release or bridge restart restores the switched provider session.
+
 ## Working directories
 
 Sending `/new <path>` (or `/n <path>`) starts the next session with `<path>` as the PI working directory and remembers it as the chat's default; a later bare `/new` reuses the remembered directory, falling back to the bridge process cwd only when nothing was ever chosen.

@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { PiCodingAgentAdapter, type PiCodingAgentAdapterOptions } from "./adapter/pi-coding-agent-adapter";
 import { createLogger } from "../../../core/logger";
+import { getPiCommandManifest } from "./commands/pi-command-manifest";
 import type {
   AgentModule,
   AgentSessionStateCodec,
@@ -27,6 +28,10 @@ export interface PiCodingAgentSessionStateV1 {
    * client-side cwd fallback or implicitly created sessions.
    */
   workingDirectorySource: "default" | "user";
+  /** Active Pi provider session after clone/fork/resume. */
+  providerSessionId?: string;
+  /** Authoritative JSONL path used to restore a switched Pi provider session. */
+  providerSessionFile?: string;
   /**
    * Decode-only marker set while the persisted record is still the legacy
    * binding-migrated form (`{ migratedFromBinding: true }`). The adapter
@@ -95,7 +100,17 @@ export const piCodingAgentSessionStateCodec: AgentSessionStateCodec<PiCodingAgen
         'invalid Pi agent session state: workingDirectorySource must be "default" or "user"',
       );
     }
-    return { version: 1, workingDirectory, workingDirectorySource: source };
+    return {
+      version: 1,
+      workingDirectory,
+      workingDirectorySource: source,
+      ...(typeof raw.providerSessionId === "string" && raw.providerSessionId
+        ? { providerSessionId: raw.providerSessionId }
+        : {}),
+      ...(typeof raw.providerSessionFile === "string" && raw.providerSessionFile
+        ? { providerSessionFile: raw.providerSessionFile }
+        : {}),
+    };
   },
 
   encode(state) {
@@ -118,6 +133,8 @@ export const piCodingAgentSessionStateCodec: AgentSessionStateCodec<PiCodingAgen
       version: 1,
       workingDirectory: state.workingDirectory,
       workingDirectorySource: state.workingDirectorySource,
+      ...(state.providerSessionId ? { providerSessionId: state.providerSessionId } : {}),
+      ...(state.providerSessionFile ? { providerSessionFile: state.providerSessionFile } : {}),
     };
   },
 };
@@ -144,6 +161,7 @@ function buildAdapterOptions(
      * resolved with precedence override > channel config > env/adapter default.
      */
     model?: string;
+    language?: "zh-CN" | "en-US";
   },
 ): PiCodingAgentAdapterOptions {
   return {
@@ -167,6 +185,7 @@ function buildAdapterOptions(
     // for chat sessions. An invalid override fails the pi process at spawn
     // (fail-fast, per the spec — no silent fallback).
     model: options.model ?? config.model ?? process.env.PI_MODEL,
+    language: options.language,
     extraArgs: config.extraArgs ?? parseExtraArgs(process.env.PI_RPC_EXTRA_ARGS),
   };
 }
@@ -201,6 +220,7 @@ function createPiCodingAgentConfigCollector(): ConfigAdapter<PiCodingAgentConfig
 export const piCodingAgentModule: AgentModule<PiCodingAgentConfig, PiCodingAgentSessionStateV1> = {
   type: "pi-coding-agent",
   sessionStateCodec: piCodingAgentSessionStateCodec,
+  getCommandManifest: getPiCommandManifest,
   createConfigCollector: createPiCodingAgentConfigCollector,
 
   async createAgentSession({ config, common, agentSessionId, sessionState, workingDirectory, workingDirectorySource, allowedWorkingDirectoryRoots, model }) {
@@ -212,6 +232,7 @@ export const piCodingAgentModule: AgentModule<PiCodingAgentConfig, PiCodingAgent
         workingDirectorySource,
         allowedWorkingDirectoryRoots,
         model,
+        language: common.language,
       }),
     );
   },
@@ -222,6 +243,7 @@ export const piCodingAgentModule: AgentModule<PiCodingAgentConfig, PiCodingAgent
       buildAdapterOptions(config, agentSessionId, sessionState, {
         mode: "resume",
         allowedWorkingDirectoryRoots,
+        language: common.language,
       }),
     );
   },

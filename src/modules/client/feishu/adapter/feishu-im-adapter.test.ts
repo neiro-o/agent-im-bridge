@@ -174,7 +174,7 @@ describe("FeishuIMAdapter", () => {
     expect(onOutput).not.toHaveBeenCalled();
     expect(fakeClientState.sendText).toHaveBeenCalledWith(
       "oc_dm",
-      expect.stringContaining("Available commands:"),
+      expect.stringContaining("## Available commands"),
       "msg-help",
     );
     expect(fakeClientState.startTyping).toHaveBeenCalledWith("oc_dm", "msg-help");

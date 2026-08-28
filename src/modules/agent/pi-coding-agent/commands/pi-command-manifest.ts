@@ -1,0 +1,65 @@
+import type { AgentCommandDescriptor, ChannelCommonContext } from "../../../../types";
+
+const descriptions = {
+  "en-US": {
+    effort: "Show or switch the current model's thinking effort.",
+    session: "Show detailed Pi session, model, token, queue, and context information.",
+    name: "Rename the current Pi session.",
+    commands: "List Pi control commands, extensions, prompt templates, and skills.",
+    steer: "Inject a message before the next model call in the active run.",
+    followUp: "Queue a message to run after the current Pi turn finishes.",
+    clone: "Clone the active branch into a new Pi session.",
+    fork: "List fork points or fork from a user-message entry ID.",
+    resume: "List resumable sessions or switch to one by ID/path.",
+    export: "Export the current Pi session as HTML and send it as a file.",
+    last: "Resend the last assistant text, optionally as a text file.",
+    autoCompact: "Query or change Pi automatic context compaction.",
+    retry: "Enable or disable Pi automatic retry.",
+    retryStop: "Abort the current automatic retry delay.",
+    modelNext: "Cycle to the next Pi model.",
+    thinkingNext: "Cycle to the next thinking level.",
+    tree: "Show a paginated, read-only view of the Pi session tree.",
+  },
+  "zh-CN": {
+    effort: "查看或切换当前模型的思考等级。",
+    session: "查看 Pi 会话、模型、Token、队列和上下文详情。",
+    name: "重命名当前 Pi 会话。",
+    commands: "列出 Pi 控制命令、扩展、Prompt 模板和技能。",
+    steer: "在当前任务的下一次模型调用前插入消息。",
+    followUp: "将消息排到当前 Pi 任务结束后执行。",
+    clone: "把当前分支克隆为新的 Pi 会话。",
+    fork: "列出可分叉节点，或按用户消息 entry ID 分叉。",
+    resume: "列出可恢复会话，或按 ID/路径切换。",
+    export: "将当前 Pi 会话导出为 HTML 并作为文件发送。",
+    last: "重新发送最后一条助手文本，可选以文本文件发送。",
+    autoCompact: "查询或切换 Pi 自动上下文压缩。",
+    retry: "启用或关闭 Pi 自动重试。",
+    retryStop: "终止当前自动重试等待。",
+    modelNext: "循环切换到下一个 Pi 模型。",
+    thinkingNext: "循环切换到下一个思考等级。",
+    tree: "分页查看 Pi 会话树（只读）。",
+  },
+} as const;
+
+export function getPiCommandManifest(common: ChannelCommonContext): AgentCommandDescriptor[] {
+  const d = descriptions[common.language];
+  return [
+    { name: "effort", aliases: ["thinking"], argumentHint: "[level]", description: d.effort, scope: "runtime", requiresActiveSession: true },
+    { name: "session", description: d.session, scope: "session", requiresActiveSession: true },
+    { name: "name", argumentHint: "<name>", description: d.name, scope: "session", requiresActiveSession: true },
+    { name: "commands", description: d.commands, scope: "runtime", requiresActiveSession: true },
+    { name: "steer", argumentHint: "<message>", description: d.steer, scope: "runtime", requiresActiveSession: true },
+    { name: "follow-up", aliases: ["fu"], argumentHint: "<message>", description: d.followUp, scope: "runtime", requiresActiveSession: true },
+    { name: "clone", description: d.clone, scope: "session", requiresActiveSession: true },
+    { name: "fork", argumentHint: "[entry-id]", description: d.fork, scope: "session", requiresActiveSession: true },
+    { name: "resume", argumentHint: "[session-id|path]", description: d.resume, scope: "session", requiresActiveSession: true },
+    { name: "export", argumentHint: "[path]", description: d.export, scope: "session", requiresActiveSession: true },
+    { name: "last", argumentHint: "[file]", description: d.last, scope: "session", requiresActiveSession: true },
+    { name: "auto-compact", argumentHint: "[on|off]", description: d.autoCompact, scope: "runtime", requiresActiveSession: true },
+    { name: "retry", argumentHint: "<on|off>", description: d.retry, scope: "runtime", requiresActiveSession: true },
+    { name: "retry-stop", description: d.retryStop, scope: "runtime", requiresActiveSession: true },
+    { name: "model-next", description: d.modelNext, scope: "runtime", requiresActiveSession: true },
+    { name: "thinking-next", description: d.thinkingNext, scope: "runtime", requiresActiveSession: true },
+    { name: "tree", argumentHint: "[page]", description: d.tree, scope: "session", requiresActiveSession: true },
+  ];
+}

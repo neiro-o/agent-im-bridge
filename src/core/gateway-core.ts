@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   AgentAdapter,
+  AgentCommandDescriptor,
   AgentOutputEvent,
   AgentSessionStateApi,
   ChannelCommonContext,
@@ -81,6 +82,7 @@ export class GatewayCore {
   readonly #channelStateStore: NonNullable<GatewayCoreOptions["channelStateStore"]>;
   readonly #agentSessionStateRegistry: NonNullable<GatewayCoreOptions["agentSessionStateRegistry"]>;
   readonly #common?: ChannelCommonContext;
+  readonly #agentCommandManifest: AgentCommandDescriptor[];
   readonly #t: Translator;
   readonly #logger: Logger = createLogger("core");
   /**
@@ -130,6 +132,9 @@ export class GatewayCore {
       agentSessionStateRegistry ?? createAgentSessionStateRegistry(this.#channelStateStore);
     this.#common = common;
     this.#t = getTranslatorForCommon(common);
+    this.#agentCommandManifest = agentModule.getCommandManifest?.(
+      common ?? { channelName: "", language: "en-US" },
+    ) ?? [];
     this.#onScheduleOutput = onScheduleOutput;
     this.#onQueueOutput = onQueueOutput;
     this.#queuesRoot = queuesRoot ?? QUEUES_DIR;
@@ -255,7 +260,7 @@ export class GatewayCore {
     }
 
     if (event.type === "command.session.compact") {
-      await this.#handleSessionCompact(event.clientSessionId);
+      await this.#handleSessionCompact(event.clientSessionId, event.customInstructions);
       return { ok: true };
     }
 
@@ -307,8 +312,91 @@ export class GatewayCore {
       return { ok: true };
     }
 
+    if (
+      event.type === "user.message" &&
+      !this.#isSyntheticClientSession(event.clientSessionId) &&
+      (await this.#tryHandleAgentCommand(event.clientSessionId, event.text))
+    ) {
+      return { ok: true };
+    }
+
     await this.#handleUserMessage(event.clientSessionId, event.text);
     return { ok: true };
+  }
+
+  async #tryHandleAgentCommand(clientSessionId: string, text: string): Promise<boolean> {
+    const match = text.trim().match(/^\/([a-z][a-z0-9:-]*)(?:\s+(.*))?$/i);
+    if (!match) return false;
+
+    const requestedName = match[1].toLowerCase();
+    const descriptor = this.#agentCommandManifest.find((command) =>
+      command.name.toLowerCase() === requestedName ||
+      command.aliases?.some((alias) => alias.toLowerCase() === requestedName),
+    );
+    if (!descriptor) return false;
+
+    const runtime = await this.#getActiveRuntime(clientSessionId);
+    if (!runtime) {
+      await this.#deliverClientInput({
+        type: "assistant.message",
+        clientSessionId,
+        text: this.#t("gateway.noActiveSessionForAgentCommand", {
+          command: `/${requestedName}`,
+        }),
+      });
+      return true;
+    }
+
+    this.#touchRuntime(runtime);
+    const provider = runtime.agentAdapter.getCommandProvider?.();
+    if (!provider) {
+      await this.#deliverClientInput({
+        type: "assistant.message",
+        clientSessionId,
+        text: this.#t("gateway.agentCommandUnsupported", { command: `/${requestedName}` }),
+      });
+      return true;
+    }
+
+    const commands = await provider.listCommands();
+    const providerDescriptor = commands.find((command) =>
+      command.name.toLowerCase() === requestedName ||
+      command.aliases?.some((alias) => alias.toLowerCase() === requestedName),
+    );
+    if (!providerDescriptor) {
+      await this.#deliverClientInput({
+        type: "assistant.message",
+        clientSessionId,
+        text: this.#t("gateway.agentCommandUnsupported", { command: `/${requestedName}` }),
+      });
+      return true;
+    }
+
+    try {
+      const result = await provider.executeCommand(
+        { name: providerDescriptor.name === descriptor.name ? requestedName : providerDescriptor.name, rawArgs: match[2] ?? "" },
+        { clientSessionId, agentSessionId: runtime.agentSessionId },
+      );
+      if (!result.handled) return false;
+      for (const message of result.messages ?? []) {
+        await this.#deliverClientInput({
+          type: "assistant.message",
+          clientSessionId,
+          text: message.text ?? "",
+          attachments: message.attachments,
+        });
+      }
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.#logger.error(`agent command /${requestedName} failed: ${detail}`);
+      await this.#deliverClientInput({
+        type: "assistant.message",
+        clientSessionId,
+        text: this.#t("gateway.agentCommandFailed", { command: `/${requestedName}`, detail }),
+      });
+      return true;
+    }
   }
 
   async #handleUserMessage(clientSessionId: string, text: string): Promise<void> {
@@ -434,7 +522,10 @@ export class GatewayCore {
     return true;
   }
 
-  async #handleSessionCompact(clientSessionId: string): Promise<void> {
+  async #handleSessionCompact(
+    clientSessionId: string,
+    customInstructions?: string,
+  ): Promise<void> {
     const runtime = await this.#getActiveRuntime(clientSessionId);
     if (!runtime) {
       await this.#deliverClientInput({
@@ -448,6 +539,7 @@ export class GatewayCore {
     this.#touchRuntime(runtime);
     await runtime.agentAdapter.input({
       type: "command.session.compact",
+      ...(customInstructions ? { customInstructions } : {}),
     });
   }
 

@@ -17,7 +17,77 @@ export type PiRpcCommand =
   | { id?: string; type: "set_model"; provider: string; modelId: string }
   | { id?: string; type: "get_available_thinking_levels" }
   | { id?: string; type: "set_thinking_level"; level: string }
-  | { id?: string; type: "set_session_name"; name: string };
+  | { id?: string; type: "set_session_name"; name: string }
+  | { id?: string; type: "get_commands" }
+  | { id?: string; type: "steer"; message: string }
+  | { id?: string; type: "follow_up"; message: string }
+  | { id?: string; type: "clone" }
+  | { id?: string; type: "get_fork_messages" }
+  | { id?: string; type: "fork"; entryId: string }
+  | { id?: string; type: "switch_session"; sessionPath: string }
+  | { id?: string; type: "export_html"; outputPath?: string }
+  | { id?: string; type: "set_auto_compaction"; enabled: boolean }
+  | { id?: string; type: "set_auto_retry"; enabled: boolean }
+  | { id?: string; type: "abort_retry" }
+  | { id?: string; type: "cycle_model" }
+  | { id?: string; type: "cycle_thinking_level" }
+  | { id?: string; type: "get_tree" }
+  | { id?: string; type: "get_entries"; since?: string };
+
+export interface PiSessionState {
+  sessionId?: string;
+  sessionFile?: string;
+  sessionName?: string;
+  thinkingLevel?: string;
+  isStreaming?: boolean;
+  isCompacting?: boolean;
+  autoCompactionEnabled?: boolean;
+  steeringMode?: string;
+  followUpMode?: string;
+  messageCount?: number;
+  pendingMessageCount?: number;
+  model?: {
+    provider?: string;
+    id?: string;
+    contextWindow?: number;
+    maxTokens?: number;
+  };
+}
+
+export interface PiSessionStats {
+  sessionFile?: string;
+  sessionId?: string;
+  userMessages?: number;
+  assistantMessages?: number;
+  toolCalls?: number;
+  toolResults?: number;
+  totalMessages?: number;
+  tokens?: {
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
+    total?: number;
+  };
+  cost?: number;
+  contextUsage?: {
+    tokens?: number | null;
+    contextWindow?: number | null;
+    percent?: number | null;
+  };
+}
+
+export interface PiDynamicCommand {
+  name: string;
+  description?: string;
+  source: "extension" | "prompt" | "skill";
+}
+
+export interface PiSessionTreeNode {
+  entry?: Record<string, unknown>;
+  children?: PiSessionTreeNode[];
+  label?: string;
+}
 
 export type PiRpcResponse = {
   id?: string;
@@ -36,6 +106,8 @@ export type PiRpcEvent = {
 export interface PiRpcClientOptions {
   agentSessionId: string;
   piSessionId: string;
+  /** Authoritative provider session file used after clone/fork/resume. */
+  sessionPath?: string;
   cwd?: string;
   sessionDir?: string;
   bin?: string;
@@ -97,8 +169,9 @@ function defaultSessionDir(): string {
 }
 
 export class PiRpcClient {
-  readonly #options: Required<Omit<PiRpcClientOptions, "model" | "extraArgs" | "logger">> & {
+  readonly #options: Required<Omit<PiRpcClientOptions, "model" | "sessionPath" | "extraArgs" | "logger">> & {
     model?: string;
+    sessionPath?: string;
     extraArgs: string[];
   };
   readonly #logger: Logger;
@@ -117,6 +190,7 @@ export class PiRpcClient {
     this.#options = {
       agentSessionId: options.agentSessionId,
       piSessionId: options.piSessionId,
+      sessionPath: options.sessionPath,
       cwd: options.cwd ?? process.cwd(),
       sessionDir: options.sessionDir ?? defaultSessionDir(),
       bin: options.bin ?? "pi",
@@ -140,11 +214,13 @@ export class PiRpcClient {
 
     await mkdir(this.#options.sessionDir, { recursive: true });
 
+    const sessionArgs = this.#options.sessionPath
+      ? ["--session", this.#options.sessionPath]
+      : ["--session-id", this.#options.piSessionId];
     const args = [
       "--mode",
       "rpc",
-      "--session-id",
-      this.#options.piSessionId,
+      ...sessionArgs,
       "--session-dir",
       this.#options.sessionDir,
       "--extension",
@@ -246,54 +322,14 @@ export class PiRpcClient {
     return data ?? {};
   }
 
-  async getState(): Promise<{
-    sessionId?: string;
-    sessionName?: string;
-    thinkingLevel?: string;
-    isStreaming?: boolean;
-    isCompacting?: boolean;
-    model?: {
-      provider?: string;
-      id?: string;
-      contextWindow?: number;
-      maxTokens?: number;
-    };
-  }> {
+  async getState(): Promise<PiSessionState> {
     const response = await this.#send({ type: "get_state" });
-    return (
-      (response.data as {
-        sessionId?: string;
-        sessionName?: string;
-        thinkingLevel?: string;
-        isStreaming?: boolean;
-        isCompacting?: boolean;
-        model?: {
-          provider?: string;
-          id?: string;
-          contextWindow?: number;
-          maxTokens?: number;
-        };
-      } | undefined) ?? {}
-    );
+    return this.#recordData(response, "get_state") as PiSessionState;
   }
 
-  async getSessionStats(): Promise<{
-    contextUsage?: {
-      tokens?: number | null;
-      contextWindow?: number | null;
-      percent?: number | null;
-    };
-  }> {
+  async getSessionStats(): Promise<PiSessionStats> {
     const response = await this.#send({ type: "get_session_stats" });
-    return (
-      (response.data as {
-        contextUsage?: {
-          tokens?: number | null;
-          contextWindow?: number | null;
-          percent?: number | null;
-        };
-      } | undefined) ?? {}
-    );
+    return this.#recordData(response, "get_session_stats") as PiSessionStats;
   }
 
   async getAvailableModels(): Promise<Array<{ provider?: string; id?: string }>> {
@@ -326,6 +362,132 @@ export class PiRpcClient {
 
   async setSessionName(name: string): Promise<void> {
     await this.#send({ type: "set_session_name", name });
+  }
+
+  async getCommands(): Promise<PiDynamicCommand[]> {
+    const data = this.#recordData(await this.#send({ type: "get_commands" }), "get_commands");
+    const commands = data.commands;
+    if (!Array.isArray(commands)) throw new Error("Invalid get_commands response");
+    return commands.filter((command): command is PiDynamicCommand => {
+      if (!command || typeof command !== "object") return false;
+      const item = command as Record<string, unknown>;
+      return typeof item.name === "string" &&
+        (item.source === "extension" || item.source === "prompt" || item.source === "skill");
+    });
+  }
+
+  async steer(message: string): Promise<void> {
+    await this.#send({ type: "steer", message });
+  }
+
+  async followUp(message: string): Promise<void> {
+    await this.#send({ type: "follow_up", message });
+  }
+
+  async clone(): Promise<{ cancelled: boolean }> {
+    const data = this.#recordData(await this.#send({ type: "clone" }), "clone");
+    return { cancelled: data.cancelled === true };
+  }
+
+  async getForkMessages(): Promise<Array<{ entryId: string; text: string }>> {
+    const data = this.#recordData(await this.#send({ type: "get_fork_messages" }), "get_fork_messages");
+    if (!Array.isArray(data.messages)) throw new Error("Invalid get_fork_messages response");
+    return data.messages.filter((message): message is { entryId: string; text: string } => {
+      if (!message || typeof message !== "object") return false;
+      const item = message as Record<string, unknown>;
+      return typeof item.entryId === "string" && typeof item.text === "string";
+    });
+  }
+
+  async fork(entryId: string): Promise<{ cancelled: boolean; text?: string }> {
+    const data = this.#recordData(await this.#send({ type: "fork", entryId }), "fork");
+    return {
+      cancelled: data.cancelled === true,
+      ...(typeof data.text === "string" ? { text: data.text } : {}),
+    };
+  }
+
+  async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
+    const data = this.#recordData(
+      await this.#send({ type: "switch_session", sessionPath }),
+      "switch_session",
+    );
+    return { cancelled: data.cancelled === true };
+  }
+
+  async exportHtml(outputPath?: string): Promise<string> {
+    const data = this.#recordData(await this.#send({ type: "export_html", outputPath }), "export_html");
+    if (typeof data.path !== "string" || !data.path) throw new Error("Invalid export_html response");
+    return data.path;
+  }
+
+  async getLastAssistantText(): Promise<string | null> {
+    const data = this.#recordData(
+      await this.#send({ type: "get_last_assistant_text" }),
+      "get_last_assistant_text",
+    );
+    if (data.text !== null && typeof data.text !== "string") {
+      throw new Error("Invalid get_last_assistant_text response");
+    }
+    return data.text as string | null;
+  }
+
+  async setAutoCompaction(enabled: boolean): Promise<void> {
+    await this.#send({ type: "set_auto_compaction", enabled });
+  }
+
+  async setAutoRetry(enabled: boolean): Promise<void> {
+    await this.#send({ type: "set_auto_retry", enabled });
+  }
+
+  async abortRetry(): Promise<void> {
+    await this.#send({ type: "abort_retry" });
+  }
+
+  async cycleModel(): Promise<{ model: { provider: string; id: string }; thinkingLevel?: string; isScoped?: boolean } | null> {
+    const response = await this.#send({ type: "cycle_model" });
+    if (response.data === null) return null;
+    const data = this.#recordData(response, "cycle_model");
+    const model = data.model;
+    if (!model || typeof model !== "object") throw new Error("Invalid cycle_model response");
+    const candidate = model as Record<string, unknown>;
+    if (typeof candidate.provider !== "string" || typeof candidate.id !== "string") {
+      throw new Error("Invalid cycle_model response");
+    }
+    return {
+      model: { provider: candidate.provider, id: candidate.id },
+      ...(typeof data.thinkingLevel === "string" ? { thinkingLevel: data.thinkingLevel } : {}),
+      ...(typeof data.isScoped === "boolean" ? { isScoped: data.isScoped } : {}),
+    };
+  }
+
+  async cycleThinkingLevel(): Promise<string | null> {
+    const response = await this.#send({ type: "cycle_thinking_level" });
+    if (response.data === null) return null;
+    const data = this.#recordData(response, "cycle_thinking_level");
+    if (typeof data.level !== "string") throw new Error("Invalid cycle_thinking_level response");
+    return data.level;
+  }
+
+  async getTree(): Promise<{ tree: PiSessionTreeNode[]; leafId: string | null }> {
+    const data = this.#recordData(await this.#send({ type: "get_tree" }), "get_tree");
+    if (!Array.isArray(data.tree)) throw new Error("Invalid get_tree response");
+    return {
+      tree: data.tree as PiSessionTreeNode[],
+      leafId: typeof data.leafId === "string" ? data.leafId : null,
+    };
+  }
+
+  cancelExtensionUiRequest(id: string): void {
+    if (!this.#process?.stdin.writable) return;
+    this.#process.stdin.write(serializeJsonLine({ type: "extension_ui_response", id, cancelled: true }));
+  }
+
+  #recordData(response: PiRpcResponse, command: string): Record<string, unknown> {
+    if (!response.data || typeof response.data !== "object" || Array.isArray(response.data)) {
+      throw new Error(`Invalid ${command} response`);
+    }
+    return response.data as Record<string, unknown>;
   }
 
   async #send(command: PiRpcCommand): Promise<PiRpcResponse> {

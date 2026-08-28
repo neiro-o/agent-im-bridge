@@ -6,6 +6,8 @@ import { GatewayCore } from "./gateway-core";
 import { emptyChannelState } from "../config/channel-state";
 import type {
   AgentAdapter,
+  AgentCommandDescriptor,
+  AgentCommandProvider,
   AgentInputEvent,
   AgentModule,
   AgentOutputEvent,
@@ -102,9 +104,12 @@ class FakeAgentAdapter implements AgentAdapter {
   setModelCalls: string[] = [];
   startError?: Error;
   stopError?: Error;
+  getCommandProvider?: () => AgentCommandProvider;
   #onOutput: ((event: AgentOutputEvent) => Promise<void> | void) | null = null;
 
-  constructor(readonly agentSessionId: string) {}
+  constructor(readonly agentSessionId: string, commandProvider?: AgentCommandProvider) {
+    if (commandProvider) this.getCommandProvider = () => commandProvider;
+  }
 
   async start(onOutput: (event: AgentOutputEvent) => Promise<void> | void): Promise<void> {
     this.#onOutput = onOutput;
@@ -221,10 +226,15 @@ function makeFakeModule(options: {
   createdAdapters?: FakeAgentAdapter[];
   create?: (args: CreateSessionArgs, createdAdapters: FakeAgentAdapter[]) => AgentAdapter | Promise<AgentAdapter>;
   resume?: (args: ResumeSessionArgs) => AgentAdapter | Promise<AgentAdapter>;
+  commandManifest?: AgentCommandDescriptor[];
+  commandProvider?: AgentCommandProvider;
 } = {}): AgentModule<Record<string, never>, FakeState> {
   return {
     type: "fake",
     sessionStateCodec: fakeStateCodec,
+    ...(options.commandManifest
+      ? { getCommandManifest: () => options.commandManifest! }
+      : {}),
     async createAgentSession(args) {
       await args.sessionState.initialize({
         version: 1,
@@ -235,7 +245,7 @@ function makeFakeModule(options: {
       if (options.create) {
         return options.create(args, options.createdAdapters ?? []);
       }
-      const adapter = new FakeAgentAdapter(args.agentSessionId);
+      const adapter = new FakeAgentAdapter(args.agentSessionId, options.commandProvider);
       options.createdAdapters?.push(adapter);
       return adapter;
     },
@@ -245,7 +255,7 @@ function makeFakeModule(options: {
       if (options.resume) {
         return options.resume(args);
       }
-      return new FakeAgentAdapter(args.agentSessionId);
+      return new FakeAgentAdapter(args.agentSessionId, options.commandProvider);
     },
   };
 }
@@ -424,6 +434,79 @@ describe("GatewayCore", () => {
     while (tempDirs.length > 0) {
       await rm(tempDirs.pop()!, { recursive: true, force: true });
     }
+  });
+
+  it("routes only declared provider commands without implicitly creating a session", async () => {
+    const imAdapter = new FakeIMAdapter();
+    const createdAdapters: FakeAgentAdapter[] = [];
+    const descriptor: AgentCommandDescriptor = {
+      name: "session",
+      description: "Show session",
+      scope: "session",
+      requiresActiveSession: true,
+    };
+    const executeCommand = vi.fn(async () => ({
+      handled: true as const,
+      messages: [{ text: "provider session details" }],
+    }));
+    const core = new GatewayCore({
+      imAdapter,
+      agentModule: makeFakeModule({
+        createdAdapters,
+        commandManifest: [descriptor],
+        commandProvider: { listCommands: () => [descriptor], executeCommand },
+      }),
+      agentConfig: {},
+      agentIdleTimeoutMs: 60_000,
+      common: { channelName: "test", language: "en-US" },
+    });
+    running.push(core);
+    await core.start();
+
+    await imAdapter.emit({ type: "user.message", clientSessionId: "client-1", text: "/session" });
+    expect(createdAdapters).toHaveLength(0);
+    expect(imAdapter.outputs.at(-1)).toMatchObject({
+      type: "assistant.message",
+      text: expect.stringContaining("No active agent session"),
+    });
+
+    await imAdapter.emit({ type: "user.message", clientSessionId: "client-1", text: "hello" });
+    expect(createdAdapters).toHaveLength(1);
+    await imAdapter.emit({ type: "user.message", clientSessionId: "client-1", text: "/session" });
+    expect(executeCommand).toHaveBeenCalledWith(
+      { name: "session", rawArgs: "" },
+      expect.objectContaining({ clientSessionId: "client-1" }),
+    );
+    expect(createdAdapters[0].inputs).toEqual([{ type: "user.message", text: "hello" }]);
+    expect(imAdapter.outputs.at(-1)).toMatchObject({ text: "provider session details" });
+
+    await imAdapter.emit({ type: "user.message", clientSessionId: "client-1", text: "/review code" });
+    expect(createdAdapters[0].inputs.at(-1)).toEqual({ type: "user.message", text: "/review code" });
+  });
+
+  it("passes custom compact instructions to the active adapter", async () => {
+    const imAdapter = new FakeIMAdapter();
+    const createdAdapters: FakeAgentAdapter[] = [];
+    const core = new GatewayCore({
+      imAdapter,
+      agentModule: makeFakeModule({ createdAdapters }),
+      agentConfig: {},
+      agentIdleTimeoutMs: 60_000,
+    });
+    running.push(core);
+    await core.start();
+    await imAdapter.emit({ type: "user.message", clientSessionId: "client-1", text: "hello" });
+
+    await imAdapter.emit({
+      type: "command.session.compact",
+      clientSessionId: "client-1",
+      customInstructions: "Focus on code changes",
+    });
+
+    expect(createdAdapters[0].inputs.at(-1)).toEqual({
+      type: "command.session.compact",
+      customInstructions: "Focus on code changes",
+    });
   });
 
   it("passes the channel common context and core-owned ids to agent session lifecycle calls", async () => {

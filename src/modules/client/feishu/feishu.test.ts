@@ -92,6 +92,7 @@ describe("feishuClientModule schedule bridges", () => {
       sessionState,
       onScheduleRun,
       onScheduleHere,
+      undefined,
     );
   });
 });

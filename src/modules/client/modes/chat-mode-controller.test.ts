@@ -51,6 +51,14 @@ describe("ChatModeController", () => {
       text: "/effort high",
     })).toEqual([{ type: "forward" }]);
 
+    for (const command of ["/stop", "/h", "/compact focus on code", "/session", "/resume abc123", "/queue-here build"]) {
+      expect(await controller.handle({
+        clientSessionId: "feishu:dm:owner",
+        chatType: "p2p",
+        text: command,
+      })).toEqual([{ type: "forward" }]);
+    }
+
     expect(await controller.handle({
       clientSessionId: "feishu:dm:owner",
       chatType: "p2p",
@@ -91,6 +99,10 @@ describe("ChatModeController", () => {
       clientSessionId: "feishu:dm:owner",
       chatType: "p2p",
       text: "/download report.txt",
-    })).toEqual([{ type: "attachment", filePath: await realpath(path.join(root, "report.txt")) }]);
+    })).toEqual([{
+      type: "attachment",
+      filePath: await realpath(path.join(root, "report.txt")),
+      kind: "file",
+    }]);
   });
 });

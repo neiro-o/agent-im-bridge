@@ -1,4 +1,5 @@
 import type {
+  AgentCommandDescriptor,
   ChannelCommonContext,
   ClientInputEvent,
   ClientOutputEvent,
@@ -28,6 +29,7 @@ import {
   type ImClientSessionStateV1,
 } from "../../utils/client-session-state";
 import { renderStatusMarkdown } from "../../utils/status-markdown";
+import { sendOutboundAttachment } from "../../utils/outbound-attachment";
 import { WeixinClient } from "./weixin-client";
 import { buildWeixinSessionId, parseWeixinSessionId } from "./weixin-session";
 
@@ -93,6 +95,7 @@ export class WeixinIMAdapter implements IMAdapter {
   readonly #sessionState: ClientSessionStateStore<ImClientSessionStateV1>;
   readonly #onScheduleRun: OnScheduleRun | undefined;
   readonly #onScheduleHere: OnScheduleHere | undefined;
+  readonly #agentCommands: AgentCommandDescriptor[];
   #onOutput: ((event: ClientOutputEvent) => Promise<void> | void) | null = null;
   #client: WeixinClient | null = null;
   #egressQueue: EgressEvent[] = [];
@@ -113,6 +116,7 @@ export class WeixinIMAdapter implements IMAdapter {
     ),
     onScheduleRun?: OnScheduleRun,
     onScheduleHere?: OnScheduleHere,
+    agentCommands: AgentCommandDescriptor[] = [],
   ) {
     this.#config = config;
     this.#logger = logger;
@@ -120,6 +124,7 @@ export class WeixinIMAdapter implements IMAdapter {
     this.#sessionState = sessionState;
     this.#onScheduleRun = onScheduleRun;
     this.#onScheduleHere = onScheduleHere;
+    this.#agentCommands = agentCommands;
   }
 
   async start(onOutput: (event: ClientOutputEvent) => Promise<void> | void): Promise<void> {
@@ -174,7 +179,9 @@ export class WeixinIMAdapter implements IMAdapter {
       await this.#refreshTyping(chatId, clientSessionId);
       this.#startTypingHeartbeat(clientSessionId, chatId);
 
-      const helpMarkdown = resolveHelpMarkdown(normalizedText, this.#t);
+      const helpMarkdown = resolveHelpMarkdown(normalizedText, this.#t, {
+        agentCommands: this.#agentCommands,
+      });
       if (helpMarkdown) {
         await this.#client?.sendText(chatId, helpMarkdown);
         this.#stopProgressTimer(clientSessionId);
@@ -307,7 +314,9 @@ export class WeixinIMAdapter implements IMAdapter {
           }
           for (const attachment of event.attachments ?? []) {
             try {
-              await this.#client.sendAttachment(target.chatId, attachment);
+              await sendOutboundAttachment(attachment, () =>
+                this.#client!.sendAttachment(target.chatId, attachment),
+              );
             } catch (attachmentError) {
               this.#logger.error("failed to send attachment:", attachmentError);
               await this.#notifySendFailure(target.chatId, attachmentError);

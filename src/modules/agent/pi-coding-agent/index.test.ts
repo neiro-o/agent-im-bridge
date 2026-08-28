@@ -14,6 +14,7 @@ const adapterOptions: Array<{
   workingDirectory?: string;
   allowedWorkingDirectoryRoots?: string[];
   model?: string;
+  language?: "zh-CN" | "en-US";
 }> = [];
 
 // The module falls back to process.env.PI_MODEL when no model is configured
@@ -42,6 +43,7 @@ vi.mock("./adapter/pi-coding-agent-adapter", () => ({
       workingDirectory?: string;
       allowedWorkingDirectoryRoots?: string[];
       model?: string;
+      language?: "zh-CN" | "en-US";
     }) {
       adapterOptions.push(options);
     }
@@ -139,6 +141,7 @@ describe("Pi coding agent module working directory", () => {
       sessionDir: expect.any(String),
       bin: expect.any(String),
       extraArgs: [],
+      language: "en-US",
     });
   });
 

@@ -28,7 +28,7 @@ export interface LocalMessage {
 export type LocalAction =
   | { type: "reply"; text: string }
   | { type: "forward" }
-  | { type: "attachment"; filePath: string; fileName?: string; cleanup?: () => Promise<void> };
+  | { type: "attachment"; filePath: string; fileName?: string; kind?: "image" | "file"; cleanup?: () => Promise<void> };
 
 interface ChatState {
   mode: ChatMode;
@@ -64,6 +64,7 @@ export class ChatModeController {
     this.#transfer = new FileTransferService({
       pathPolicy: this.#policy,
       maxTransferBytes: options.config.maxTransferBytes,
+      overwriteUploads: options.config.overwriteUploads,
     });
     this.#loadWorkingDirectory = options.loadWorkingDirectory;
     this.#saveWorkingDirectory = options.saveWorkingDirectory;
@@ -120,7 +121,10 @@ export class ChatModeController {
       return [{ type: "forward" }];
     }
 
-    if (/^\/(effort|thinking)(?:\s|$)/i.test(text) || /^\/(help|status|st|model|m|new|n|compact|c)$/i.test(text)) {
+    if (
+      /^\/(help|h|stop|s|status|st)$/i.test(text) ||
+      /^\/(new|n|compact|c|model|m|effort|thinking|schedule-run|schedule-here|queue-here|session|name|commands|steer|follow-up|fu|clone|fork|resume|export|last|auto-compact|retry|retry-stop|model-next|thinking-next|tree)(?:\s|$)/i.test(text)
+    ) {
       return [{ type: "forward" }];
     }
 
@@ -139,18 +143,36 @@ export class ChatModeController {
       const expression = download[1]?.trim();
       if (!expression) return [{ type: "reply", text: "用法：/download <路径、目录或通配符>" }];
       const plan = await this.#transfer.prepareDownload(expression, state.cwd!);
+      const skippedReply: LocalAction[] = plan.skipped.length
+        ? [{
+            type: "reply",
+            text: `已跳过以下项目：\n${plan.skipped.map((item) => `- ${item.path}: ${item.reason}`).join("\n")}`,
+          }]
+        : [];
       if (plan.directFile) {
-        return [{ type: "attachment", filePath: plan.directFile }];
-      }
-      if (plan.archive) {
-        return [{
+        return [...skippedReply, {
           type: "attachment",
-          filePath: plan.archive.path,
-          fileName: plan.archive.displayName,
-          cleanup: plan.archive.cleanup,
+          filePath: plan.directFile,
+          kind: this.#attachmentKind(plan.directFile),
         }];
       }
-      return [{ type: "reply", text: `没有可发送的文件。${plan.skipped.length ? ` 已跳过 ${plan.skipped.length} 项。` : ""}` }];
+      if (plan.archive) {
+        return [
+          ...skippedReply,
+          {
+            type: "attachment",
+            filePath: plan.archive.path,
+            fileName: plan.archive.displayName,
+            cleanup: plan.archive.cleanup,
+          },
+        ];
+      }
+      return [{
+        type: "reply",
+        text: plan.skipped.length
+          ? `没有可发送的文件。\n${plan.skipped.map((item) => `- ${item.path}: ${item.reason}`).join("\n")}`
+          : "没有可发送的文件。",
+      }];
     }
 
     if ((message.attachments?.length ?? 0) > 0) {
@@ -165,7 +187,7 @@ export class ChatModeController {
       if (this.#config.uploadSingleShot) state.uploadTarget = undefined;
       return [{
         type: "reply",
-        text: `上传完成：\n${saved.map((item) => `- ${item.sourceName} → ${item.path}`).join("\n")}`,
+        text: `上传完成：\n${saved.map((item) => `- ${item.sourceName} → ${item.path} (${this.#formatBytes(item.sizeBytes)})`).join("\n")}`,
       }];
     }
 
@@ -182,6 +204,16 @@ export class ChatModeController {
     if (result.truncated) parts.push("输出超过限制，已截断。");
     parts.push(`当前目录：${state.cwd}`);
     return [{ type: "reply", text: parts.join("\n\n") }];
+  }
+
+  #attachmentKind(filePath: string): "image" | "file" {
+    return /\.(png|jpe?g|gif|webp|bmp)$/i.test(filePath) ? "image" : "file";
+  }
+
+  #formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
   }
 
   #isAuthorized(message: LocalMessage): boolean {

@@ -19,6 +19,25 @@ describe("FileTransferService", () => {
     expect(path.basename(result.path)).toBe("note (1).txt"); expect(await readFile(source, "utf8")).toBe("hello");
   });
 
+  it("overwrites uploads only when explicitly enabled", async () => {
+    const root = await rootFixture();
+    const incoming = await rootFixture();
+    const source = path.join(incoming, "source");
+    await writeFile(source, "new");
+    await writeFile(path.join(root, "note.txt"), "old");
+    const service = new FileTransferService({
+      pathPolicy: new PathPolicy([root]),
+      overwriteUploads: true,
+    });
+
+    const [result] = await service.saveInboundAttachments([
+      { kind: "file", localPath: source, fileName: "note.txt" },
+    ], root);
+
+    expect(path.basename(result.path)).toBe("note.txt");
+    expect(await readFile(result.path, "utf8")).toBe("new");
+  });
+
   it("creates an archive plan and cleanup only removes its temp directory", async () => {
     const root = await rootFixture(); await mkdir(path.join(root, "folder"));
     const original = path.join(root, "folder", "a.txt"); await writeFile(original, "archive me");

@@ -212,7 +212,7 @@ describe("WeixinIMAdapter", () => {
     expect(onOutput).not.toHaveBeenCalled();
     expect(fakeClientState.sendText).toHaveBeenCalledWith(
       "wxid_user_1",
-      expect.stringContaining("可用命令："),
+      expect.stringContaining("## 可用命令"),
     );
     expect(fakeClientState.sendTyping).toHaveBeenCalledWith("wxid_user_1");
     expect(fakeClientState.stopTyping).toHaveBeenCalledWith("wxid_user_1");

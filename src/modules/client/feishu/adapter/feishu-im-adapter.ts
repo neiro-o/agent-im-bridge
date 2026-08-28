@@ -1,4 +1,5 @@
 import type {
+  AgentCommandDescriptor,
   ChannelCommonContext,
   ClientInputEvent,
   ClientOutputEvent,
@@ -28,6 +29,7 @@ import {
   type ImClientSessionStateV1,
 } from "../../utils/client-session-state";
 import { renderStatusMarkdown } from "../../utils/status-markdown";
+import { sendOutboundAttachment } from "../../utils/outbound-attachment";
 import { ChatModeController, normalizeChatModeConfig, type LocalAction } from "../../modes/chat-mode-controller";
 import { FeishuClient } from "./feishu-client";
 import { buildFeishuSessionId, parseFeishuSessionId } from "./feishu-session";
@@ -71,6 +73,7 @@ export class FeishuIMAdapter implements IMAdapter {
   readonly #sessionState: ClientSessionStateStore<ImClientSessionStateV1>;
   readonly #onScheduleRun: OnScheduleRun | undefined;
   readonly #onScheduleHere: OnScheduleHere | undefined;
+  readonly #agentCommands: AgentCommandDescriptor[];
   readonly #modeController: ChatModeController | null;
   #onOutput: ((event: ClientOutputEvent) => Promise<void> | void) | null = null;
   #client: FeishuClient | null = null;
@@ -124,6 +127,7 @@ export class FeishuIMAdapter implements IMAdapter {
     ),
     onScheduleRun?: OnScheduleRun,
     onScheduleHere?: OnScheduleHere,
+    agentCommands: AgentCommandDescriptor[] = [],
   ) {
     this.#config = config;
     this.#logger = logger;
@@ -131,6 +135,7 @@ export class FeishuIMAdapter implements IMAdapter {
     this.#sessionState = sessionState;
     this.#onScheduleRun = onScheduleRun;
     this.#onScheduleHere = onScheduleHere;
+    this.#agentCommands = agentCommands;
     this.#modeController = config.localControl
       ? new ChatModeController({
           config: normalizeChatModeConfig(config.localControl),
@@ -195,7 +200,14 @@ export class FeishuIMAdapter implements IMAdapter {
         }
       }
 
-      const helpMarkdown = resolveHelpMarkdown(normalizedText, this.#t);
+      const helpMarkdown = resolveHelpMarkdown(normalizedText, this.#t, {
+        agentCommands: this.#agentCommands,
+        includeLocalControl: Boolean(
+          this.#config.localControl?.enabled &&
+          this.#config.localControl.allowedClientSessionIds?.includes(clientSessionId) &&
+          (chatType !== "group" || this.#config.localControl.allowGroupChats),
+        ),
+      });
       if (helpMarkdown) {
         this.#logger.info(`received local help command ${normalizedText} (session=${clientSessionId})`);
         await this.#client?.sendText(chatId, helpMarkdown, messageId);
@@ -324,7 +336,9 @@ const replyToMessageId = this.#lastInboundMessageIdBySession.get(event.clientSes
           }
           for (const attachment of event.attachments ?? []) {
             try {
-              await this.#client.sendAttachment(target.chatId, attachment, replyToMessageId);
+              await sendOutboundAttachment(attachment, () =>
+                this.#client!.sendAttachment(target.chatId, attachment, replyToMessageId),
+              );
             } catch (attachmentError) {
               this.#logger.error("failed to send attachment:", attachmentError);
               await this.#notifySendFailure(target.chatId, attachmentError);
@@ -357,7 +371,7 @@ const replyToMessageId = this.#lastInboundMessageIdBySession.get(event.clientSes
     if (action.type === "attachment") {
       try {
         await this.#client.sendAttachment(chatId, {
-          kind: "file",
+          kind: action.kind ?? "file",
           filePath: action.filePath,
           fileName: action.fileName,
         }, messageId);

@@ -1,4 +1,5 @@
 import type {
+  AgentCommandDescriptor,
   ChannelCommonContext,
   ClientInputEvent,
   ClientOutputEvent,
@@ -28,6 +29,7 @@ import {
   type ImClientSessionStateV1,
 } from "../../utils/client-session-state";
 import { renderStatusMarkdown } from "../../utils/status-markdown";
+import { sendOutboundAttachment } from "../../utils/outbound-attachment";
 import { WecomClient } from "./wecom-client";
 import { buildWecomSessionId, parseWecomSessionId } from "./wecom-session";
 
@@ -75,6 +77,7 @@ export class WecomIMAdapter implements IMAdapter {
   readonly #sessionState: ClientSessionStateStore<ImClientSessionStateV1>;
   readonly #onScheduleRun: OnScheduleRun | undefined;
   readonly #onScheduleHere: OnScheduleHere | undefined;
+  readonly #agentCommands: AgentCommandDescriptor[];
   #onOutput: ((event: ClientOutputEvent) => Promise<void> | void) | null = null;
   #client: WecomClient | null = null;
   #egressQueue: ClientInputEvent[] = [];
@@ -112,6 +115,7 @@ export class WecomIMAdapter implements IMAdapter {
     ),
     onScheduleRun?: OnScheduleRun,
     onScheduleHere?: OnScheduleHere,
+    agentCommands: AgentCommandDescriptor[] = [],
   ) {
     this.#config = config;
     this.#logger = logger;
@@ -119,6 +123,7 @@ export class WecomIMAdapter implements IMAdapter {
     this.#sessionState = sessionState;
     this.#onScheduleRun = onScheduleRun;
     this.#onScheduleHere = onScheduleHere;
+    this.#agentCommands = agentCommands;
   }
 
   async start(onOutput: (event: ClientOutputEvent) => Promise<void> | void): Promise<void> {
@@ -150,7 +155,9 @@ export class WecomIMAdapter implements IMAdapter {
       }
 
       const normalizedText = text.trim();
-      const helpMarkdown = resolveHelpMarkdown(normalizedText, this.#t);
+      const helpMarkdown = resolveHelpMarkdown(normalizedText, this.#t, {
+        agentCommands: this.#agentCommands,
+      });
       if (helpMarkdown) {
         await this.#client?.sendText(chatId, helpMarkdown, messageId);
         return;
@@ -276,7 +283,9 @@ const replyToMessageId = this.#lastInboundMessageIdBySession.get(event.clientSes
           }
           for (const attachment of event.attachments ?? []) {
             try {
-              await this.#client.sendAttachment(target.chatId, attachment, replyToMessageId);
+              await sendOutboundAttachment(attachment, () =>
+                this.#client!.sendAttachment(target.chatId, attachment, replyToMessageId),
+              );
             } catch (attachmentError) {
               this.#logger.error("failed to send attachment:", attachmentError);
               await this.#notifySendFailure(target.chatId, attachmentError);

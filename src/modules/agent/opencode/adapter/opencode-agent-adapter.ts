@@ -448,6 +448,13 @@ export class OpenCodeAgentAdapter implements AgentAdapter, OpenCodeRuntimeAdapte
         return;
       }
 
+      if (event.customInstructions) {
+        await this.#emitAssistant(
+          "OpenCode does not support custom `/compact` instructions; send `/compact` without arguments.",
+        );
+        return;
+      }
+
       const model = await this.#resolveCurrentModel();
       const compactCompletion = this.#beginCompact();
       this.#busy = true;

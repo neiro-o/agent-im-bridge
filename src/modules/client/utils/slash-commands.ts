@@ -7,6 +7,7 @@ import type {
   ScheduleRunResult,
 } from "../../../types";
 import type { ImClientSessionStateV1 } from "./client-session-state";
+import { renderHelpMarkdown, type RenderHelpMarkdownOptions } from "./command-help";
 import { validateWorkingDirectory } from "./working-directory";
 
 function isHelpCommand(text: string): boolean {
@@ -24,8 +25,12 @@ function isHelpCommand(text: string): boolean {
  * returns a localized help markdown string, or `null` if `text` is not a help
  * command and should continue through the normal command/message flow.
  */
-export function resolveHelpMarkdown(text: string, t: Translator): string | null {
-  return isHelpCommand(text) ? t("client.helpMessage") : null;
+export function resolveHelpMarkdown(
+  text: string,
+  t: Translator,
+  options: RenderHelpMarkdownOptions = {},
+): string | null {
+  return isHelpCommand(text) ? renderHelpMarkdown(t, options) : null;
 }
 
 function parseModelCommand(text: string, clientSessionId: string): ParsedSlashCommand | null {
@@ -229,10 +234,17 @@ export function parseSlashCommand(
     return modelCommand;
   }
 
+  const compactMatch = text.match(/^\/(compact|c)(?:\s+(.*))?$/i);
+  if (compactMatch) {
+    const customInstructions = compactMatch[2]?.trim();
+    return {
+      type: "command.session.compact",
+      clientSessionId,
+      ...(customInstructions ? { customInstructions } : {}),
+    };
+  }
+
   switch (text.toLowerCase()) {
-    case "/compact":
-    case "/c":
-      return { type: "command.session.compact", clientSessionId };
     case "/stop":
     case "/s":
       return { type: "command.session.stop", clientSessionId };

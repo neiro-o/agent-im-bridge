@@ -32,6 +32,12 @@ let mockedState: {
   thinkingLevel?: string;
   isStreaming?: boolean;
   isCompacting?: boolean;
+  autoCompactionEnabled?: boolean;
+  sessionFile?: string;
+  messageCount?: number;
+  pendingMessageCount?: number;
+  steeringMode?: string;
+  followUpMode?: string;
 } = { sessionId: "agent-1", sessionName: "agent-1" };
 
 let mockedSessionStats: {
@@ -42,6 +48,9 @@ let mockedAvailableModels: Array<{ provider: string; id: string }> = [];
 let setModelCalls: Array<{ provider: string; modelId: string }> = [];
 let promptCalls: Array<{ message: string; streamingBehavior?: "steer" | "followUp" }> = [];
 let abortCalls = 0;
+let setSessionNameCalls: string[] = [];
+let steerCalls: string[] = [];
+let followUpCalls: string[] = [];
 
 vi.mock("./pi-rpc-client", () => {
   return {
@@ -103,7 +112,23 @@ vi.mock("./pi-rpc-client", () => {
         return { provider, id: modelId };
       }
 
-      async setSessionName(): Promise<void> {}
+      async setSessionName(name: string): Promise<void> {
+        setSessionNameCalls.push(name);
+      }
+
+      async getCommands() {
+        return [{ name: "review", source: "prompt", description: "Review code" }];
+      }
+
+      async steer(message: string): Promise<void> {
+        steerCalls.push(message);
+      }
+
+      async followUp(message: string): Promise<void> {
+        followUpCalls.push(message);
+      }
+
+      cancelExtensionUiRequest(): void {}
     },
   };
 });
@@ -192,9 +217,50 @@ afterEach(() => {
   setModelCalls = [];
   promptCalls = [];
   abortCalls = 0;
+  setSessionNameCalls = [];
+  steerCalls = [];
+  followUpCalls = [];
 });
 
 describe("PiCodingAgentAdapter", () => {
+  it("executes low-risk Pi provider commands without forwarding them as prompts", async () => {
+    mockedState = {
+      sessionId: "pi-session-1",
+      sessionName: "Demo",
+      model: { provider: "anthropic", id: "claude" },
+      thinkingLevel: "high",
+      autoCompactionEnabled: true,
+      messageCount: 4,
+      pendingMessageCount: 0,
+    };
+    const adapter = new PiCodingAgentAdapter({
+      agentSessionId: "agent-1",
+      mode: "create",
+      sessionState: createFakeHandle(),
+      language: "zh-CN",
+    });
+    await adapter.start(() => {});
+    const provider = adapter.getCommandProvider();
+    const context = { clientSessionId: "client-1", agentSessionId: "agent-1" };
+
+    const session = await provider.executeCommand({ name: "session", rawArgs: "" }, context);
+    expect(session).toMatchObject({ handled: true });
+    expect(JSON.stringify(session)).toContain("Pi 会话");
+
+    await provider.executeCommand({ name: "name", rawArgs: "新名称" }, context);
+    expect(setSessionNameCalls).toEqual(["新名称"]);
+
+    const commands = await provider.executeCommand({ name: "commands", rawArgs: "" }, context);
+    expect(JSON.stringify(commands)).toContain("/review");
+
+    rpcClients[0]?.emit({ type: "agent_start" });
+    await provider.executeCommand({ name: "steer", rawArgs: "现在处理" }, context);
+    await provider.executeCommand({ name: "follow-up", rawArgs: "稍后处理" }, context);
+    expect(steerCalls).toEqual(["现在处理"]);
+    expect(followUpCalls).toEqual(["稍后处理"]);
+    expect(promptCalls).toEqual([]);
+  });
+
   it("delegates busy-message steering to Pi and aborts only while a run is active", async () => {
     const adapter = new PiCodingAgentAdapter({ agentSessionId: "agent-1", mode: "create", sessionState: createFakeHandle() });
 

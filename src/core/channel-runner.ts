@@ -51,6 +51,7 @@ export async function runChannel({ channelName, channelConfig, defaults }: RunCh
     // in the destination chat locally and hand over the task name plus this
     // chat's clientSessionId; the scheduler writes them into the task file.
     onScheduleHere: (taskName, clientSessionId) => scheduler.claimTarget(taskName, clientSessionId),
+    agentCommands: agentModule.getCommandManifest?.(common) ?? [],
   });
 
   const core = new GatewayCore({

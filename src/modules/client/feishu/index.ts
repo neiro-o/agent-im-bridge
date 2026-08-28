@@ -92,7 +92,15 @@ export const feishuClientModule: ClientModule<FeishuClientConfig, ImClientSessio
     }
   },
   createConfigCollector: createFeishuConfigCollector,
-  createClientAdapter({ config, common, sessionState, onScheduleRun, onScheduleHere }) {
-    return new FeishuIMAdapter(config, undefined, common, sessionState, onScheduleRun, onScheduleHere);
+  createClientAdapter({ config, common, sessionState, onScheduleRun, onScheduleHere, agentCommands }) {
+    return new FeishuIMAdapter(
+      config,
+      undefined,
+      common,
+      sessionState,
+      onScheduleRun,
+      onScheduleHere,
+      agentCommands,
+    );
   },
 };

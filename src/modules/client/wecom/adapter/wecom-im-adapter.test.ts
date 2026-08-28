@@ -214,7 +214,7 @@ describe("WecomIMAdapter", () => {
     expect(onOutput).not.toHaveBeenCalled();
     expect(fakeClientState.sendText).toHaveBeenCalledWith(
       "user_1",
-      expect.stringContaining("Available commands:"),
+      expect.stringContaining("## Available commands"),
       "msg-help",
     );
     expect(fakeClientState.sendStreamText).not.toHaveBeenCalled();

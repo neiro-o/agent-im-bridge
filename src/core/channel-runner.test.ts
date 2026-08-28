@@ -180,6 +180,7 @@ describe("runChannel", () => {
       sessionState: expect.any(Object),
       onScheduleRun: expect.any(Function),
       onScheduleHere: expect.any(Function),
+      agentCommands: [],
     });
     expect(gatewayCoreCtor).toHaveBeenCalledWith(
       expect.objectContaining({

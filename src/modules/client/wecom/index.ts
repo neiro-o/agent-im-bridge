@@ -64,7 +64,15 @@ export const wecomClientModule: ClientModule<WecomClientConfig, ImClientSessionS
     }
   },
   createConfigCollector: createWecomConfigCollector,
-  createClientAdapter({ config, common, sessionState, onScheduleRun, onScheduleHere }) {
-    return new WecomIMAdapter(config, undefined, common, sessionState, onScheduleRun, onScheduleHere);
+  createClientAdapter({ config, common, sessionState, onScheduleRun, onScheduleHere, agentCommands }) {
+    return new WecomIMAdapter(
+      config,
+      undefined,
+      common,
+      sessionState,
+      onScheduleRun,
+      onScheduleHere,
+      agentCommands,
+    );
   },
 };
