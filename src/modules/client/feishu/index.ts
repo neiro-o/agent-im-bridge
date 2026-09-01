@@ -27,11 +27,17 @@ function createFeishuConfigCollector(): ConfigAdapter<FeishuClientConfig> {
 
       const requireMentionInGroup = await ctx.confirm("Require @mention in group chats", true);
 
+      const accessControlEnabled = await ctx.confirm(
+        "Enable user access control (users need CLI approval before they can use the bot)",
+        false,
+      );
+
       return {
         appId,
         appSecret,
         domain: domain as FeishuClientConfig["domain"],
         requireMentionInGroup,
+        ...(accessControlEnabled ? { accessControl: { enabled: true } } : {}),
       };
     },
 

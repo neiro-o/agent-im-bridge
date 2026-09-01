@@ -97,6 +97,11 @@ const resources = {
         effortInvalidDetail: "Available levels: {{levels}}.",
         effortUnavailable: "Thinking effort is unavailable for the current session.",
         agentRunFailed: "The agent run failed.",
+        accessPendingReply:
+          "You are not authorized to use this bot yet. The administrator has been notified and can approve you from the CLI with `{{command}}`.",
+        accessApprovedNotice: "Your access request has been approved. You can now use this bot.",
+        accessSshDenied:
+          "Your account is not authorized for SSH mode. An administrator can grant it with `{{command}}`.",
       },
       gateway: {
         noActiveSessionToCompact: "No active agent session to compact.",
@@ -242,7 +247,12 @@ const resources = {
         effortInvalid: "请求的思考等级无效。",
         effortInvalidDetail: "可用等级：{{levels}}。",
         effortUnavailable: "当前会话暂时无法获取或调整思考等级。",
-        agentRunFailed: "智能体任务执行失败。"
+        agentRunFailed: "智能体任务执行失败。",
+        accessPendingReply:
+          "你还没有使用本机器人的权限。管理员已收到通知，可在命令行执行 `{{command}}` 完成授权。",
+        accessApprovedNotice: "你的访问请求已通过管理员授权，现在可以正常使用了。",
+        accessSshDenied:
+          "你的账号未获得 SSH 模式授权。管理员可在命令行执行 `{{command}}` 开通。",
       },
       gateway: {
         noActiveSessionToCompact: "当前没有可压缩的智能体会话。",

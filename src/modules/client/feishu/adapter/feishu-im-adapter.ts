@@ -31,6 +31,7 @@ import {
 import { renderStatusMarkdown } from "../../utils/status-markdown";
 import { sendOutboundAttachment } from "../../utils/outbound-attachment";
 import { ChatModeController, normalizeChatModeConfig, type LocalAction } from "../../modes/chat-mode-controller";
+import { AccessController } from "../../access/access-controller";
 import { FeishuClient } from "./feishu-client";
 import { buildFeishuSessionId, parseFeishuSessionId } from "./feishu-session";
 
@@ -75,10 +76,13 @@ export class FeishuIMAdapter implements IMAdapter {
   readonly #onScheduleHere: OnScheduleHere | undefined;
   readonly #agentCommands: AgentCommandDescriptor[];
   readonly #modeController: ChatModeController | null;
+  readonly #accessController: AccessController | null;
+  readonly #accessNoticePollMs: number;
   #onOutput: ((event: ClientOutputEvent) => Promise<void> | void) | null = null;
   #client: FeishuClient | null = null;
   #egressQueue: ClientInputEvent[] = [];
   #processing = false;
+  #accessNoticeTimer: ReturnType<typeof setInterval> | null = null;
   #lastInboundMessageIdBySession = new Map<string, string>();
   #progressStateBySession = new Map<
     string,
@@ -128,6 +132,8 @@ export class FeishuIMAdapter implements IMAdapter {
     onScheduleRun?: OnScheduleRun,
     onScheduleHere?: OnScheduleHere,
     agentCommands: AgentCommandDescriptor[] = [],
+    /** Test seam: overrides the approval-notice poll interval (default 3s). */
+    options?: { accessNoticePollMs?: number },
   ) {
     this.#config = config;
     this.#logger = logger;
@@ -136,6 +142,13 @@ export class FeishuIMAdapter implements IMAdapter {
     this.#onScheduleRun = onScheduleRun;
     this.#onScheduleHere = onScheduleHere;
     this.#agentCommands = agentCommands;
+    this.#accessNoticePollMs = options?.accessNoticePollMs ?? 3000;
+    this.#accessController = config.accessControl?.enabled
+      ? new AccessController({
+          channelName: common?.channelName ?? "",
+          t: this.#t,
+        })
+      : null;
     this.#modeController = config.localControl
       ? new ChatModeController({
           config: normalizeChatModeConfig(config.localControl),
@@ -150,6 +163,18 @@ export class FeishuIMAdapter implements IMAdapter {
               sshWorkingDirectory: cwd,
             }));
           },
+          // When user access control is on, SSH additionally requires the
+          // elevated "ssh" grant; the chat allowlist keeps applying on top.
+          ...(this.#accessController
+            ? {
+                authorizeSsh: (message: { senderId?: string }) =>
+                  this.#accessController!.hasGrant(message.senderId, "ssh"),
+                sshDeniedText: (senderId?: string) =>
+                  this.#t("client.accessSshDenied", {
+                    command: `agent-bridge access approve ${senderId ?? "<open-id>"} --ssh`,
+                  }),
+              }
+            : {}),
         })
       : null;
   }
@@ -157,7 +182,7 @@ export class FeishuIMAdapter implements IMAdapter {
   async start(onOutput: (event: ClientOutputEvent) => Promise<void> | void): Promise<void> {
     this.#onOutput = onOutput;
     this.#client = new FeishuClient(this.#config, this.#logger);
-    this.#client.setOnMessage(async ({ chatId, chatType, text, messageId, mentionedBot, attachments }) => {
+    this.#client.setOnMessage(async ({ chatId, chatType, text, messageId, mentionedBot, senderId, senderName, attachments }) => {
       if (!this.#onOutput) {
         this.#logger.warn(`dropping inbound message, adapter not ready (chatId=${chatId})`);
         return;
@@ -172,6 +197,28 @@ export class FeishuIMAdapter implements IMAdapter {
         return;
       }
 
+      if (this.#accessController) {
+        let verdict;
+        try {
+          verdict = await this.#accessController.check({
+            chatId,
+            chatType,
+            senderId,
+            ...(senderName !== undefined ? { senderName } : {}),
+          });
+        } catch (error) {
+          // Fail closed: a broken authz store must never open the gate.
+          this.#logger.error("access control check failed:", error);
+          verdict = { allowed: false };
+        }
+        if (!verdict.allowed) {
+          if (verdict.reply) {
+            await this.#client?.sendText(chatId, verdict.reply, messageId);
+          }
+          return;
+        }
+      }
+
       const normalizedText = text.trim();
       this.#lastInboundMessageIdBySession.set(clientSessionId, messageId);
       this.#resetProgressState(clientSessionId);
@@ -183,6 +230,7 @@ export class FeishuIMAdapter implements IMAdapter {
             clientSessionId,
             chatType,
             text,
+            senderId,
             attachments,
           });
           if (!(actions.length === 1 && actions[0].type === "forward")) {
@@ -265,10 +313,44 @@ export class FeishuIMAdapter implements IMAdapter {
     });
 
     await this.#client.connect();
-    this.#logger.info(`adapter started (domain=${this.#config.domain ?? "feishu"})`);
+    this.#logger.info(
+      `adapter started (domain=${this.#config.domain ?? "feishu"}, accessControl=${this.#accessController ? "on" : "off"})`,
+    );
+
+    if (this.#accessController) {
+      // Watches the authz file for CLI approvals and notifies each approved
+      // user in the chat they last requested from.
+      this.#accessNoticeTimer = setInterval(() => {
+        void this.#deliverAccessNotices();
+      }, this.#accessNoticePollMs);
+      this.#accessNoticeTimer.unref?.();
+    }
+  }
+
+  async #deliverAccessNotices(): Promise<void> {
+    if (!this.#accessController || !this.#client) return;
+    let notices;
+    try {
+      notices = await this.#accessController.pollApprovalNotices();
+    } catch (error) {
+      this.#logger.warn("failed to poll access approvals:", error);
+      return;
+    }
+    for (const notice of notices) {
+      try {
+        await this.#client.sendText(notice.chatId, this.#t("client.accessApprovedNotice"));
+        await this.#accessController.markNotified(notice.senderId);
+      } catch (error) {
+        this.#logger.warn(`failed to notify approved user ${notice.senderId}:`, error);
+      }
+    }
   }
 
   async stop(): Promise<void> {
+    if (this.#accessNoticeTimer) {
+      clearInterval(this.#accessNoticeTimer);
+      this.#accessNoticeTimer = null;
+    }
     this.#egressQueue.length = 0;
     await this.#modeController?.stop();
     if (this.#client) {

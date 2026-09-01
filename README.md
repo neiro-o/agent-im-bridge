@@ -1,12 +1,12 @@
-# agent-bridge
+# agent-im-bridge
 
-[![npm version](https://img.shields.io/npm/v/%40hopgoldy%2Fagent-bridge?style=flat-square&logo=npm)](https://www.npmjs.com/package/@hopgoldy/agent-bridge)
-[![npm unpacked size](https://img.shields.io/npm/unpacked-size/%40hopgoldy%2Fagent-bridge?style=flat-square)](https://www.npmjs.com/package/@hopgoldy/agent-bridge)
-[![test status](https://img.shields.io/github/actions/workflow/status/HoPGoldy/agent-bridge/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/HoPGoldy/agent-bridge/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/%40neiro_o%2Fagent-im-bridge?style=flat-square&logo=npm)](https://www.npmjs.com/package/@neiro_o/agent-im-bridge)
+[![npm unpacked size](https://img.shields.io/npm/unpacked-size/%40neiro_o%2Fagent-im-bridge?style=flat-square)](https://www.npmjs.com/package/@neiro_o/agent-im-bridge)
+[![test status](https://img.shields.io/github/actions/workflow/status/neiro-o/agent-im-bridge/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/neiro-o/agent-im-bridge/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D22-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)](#license)
 
-`agent-bridge` connects IM channel (feishu, weixin, wecom...) to local coding agent (pi, codex, opencode...) using a dual-adapter architecture.
+`agent-im-bridge` connects IM channel (feishu, weixin, wecom...) to local coding agent (pi, codex, opencode...) using a dual-adapter architecture.
 
 The design stays intentionally simple and compact: no harness layer, no extra tools, no extra skills, just forwarding messages from IM to the local agent.
 
@@ -37,25 +37,40 @@ Agent side:
 Install the CLI:
 
 ```bash
-npm install -g @hopgoldy/agent-bridge
+npm install -g @neiro_o/agent-im-bridge
 ```
 
 The CLI currently provides these commands:
 
-- `agent-bridge add`
-- `agent-bridge ls`
-- `agent-bridge remove <channel-name>`
-- `agent-bridge start <channel-name>`
-- `agent-bridge queue add`
-- `agent-bridge queue insert <queue-name> --prompt "..." [--directory <path>]`
-- `agent-bridge queue list`
-- `agent-bridge schedule history [task-name]`
-- `agent-bridge queue history <queue-name>`
+- `agent-im-bridge add`
+- `agent-im-bridge ls`
+- `agent-im-bridge remove <channel-name>`
+- `agent-im-bridge start <channel-name>`
+- `agent-im-bridge feishu setup` — guided Feishu bot onboarding: exact permission checklist with console links and QR codes, credential verification, and a live capability probe (receiving the bot's reply proves event subscription, version publish and availability in one go)
+- `agent-im-bridge access pending|list` — show users waiting for authorization / already authorized
+- `agent-im-bridge access approve <open-id> [--ssh]` / `deny` / `revoke` — manage the user allowlist (applies to a running bridge within seconds, no restart)
+- `agent-im-bridge queue add`
+- `agent-im-bridge queue insert <queue-name> --prompt "..." [--directory <path>]`
+- `agent-im-bridge queue list`
+- `agent-im-bridge schedule history [task-name]`
+- `agent-im-bridge queue history <queue-name>`
+
+### User access control (Feishu)
+
+A Feishu channel can require administrator approval before a user may talk to the bot: enable `accessControl.enabled` in the channel config (the `add` wizard and `feishu setup` both offer it). Unauthorized users get a "waiting for approval" reply and are recorded — with their open_id captured automatically — in `~/.config/agent-bridge/authz.json`. The administrator approves them from the CLI:
+
+```bash
+agent-im-bridge access pending              # who is waiting (open_id, name, chat)
+agent-im-bridge access approve ou_xxx       # grant bot access (agent mode)
+agent-im-bridge access approve ou_xxx --ssh # also grant SSH mode
+```
+
+The approved user is notified in their chat automatically. SSH mode stays additionally protected by the chat-level `localControl.allowedClientSessionIds` allowlist — both gates must pass.
 
 Create a channel interactively:
 
 ```bash
-agent-bridge add
+agent-im-bridge add
 ```
 
 The prompt flow currently asks for:
@@ -69,19 +84,19 @@ The prompt flow currently asks for:
 Start the configured channel:
 
 ```bash
-agent-bridge start <channel-name>
+agent-im-bridge start <channel-name>
 ```
 
 List configured channels:
 
 ```bash
-agent-bridge ls
+agent-im-bridge ls
 ```
 
 Remove a configured channel:
 
 ```bash
-agent-bridge remove <channel-name>
+agent-im-bridge remove <channel-name>
 ```
 
 Config file: `~/.config/agent-bridge/config.json`
@@ -94,7 +109,7 @@ Scheduled tasks (cron-style agent sessions with file-based prompts): [`docs/sche
 
 Event queues (FIFO agent task queues with file-based prompts, worker concurrency and chat-bound result delivery): [`docs/event-queue.md`](./docs/event-queue.md)
 
-Event queues let you run a stream of agent prompts through the same pipeline as scheduled tasks: a queue definition (`queues/<name>.md`) carries a worker count, an optional model and a shared-context body appended to every task; tasks are inserted with `agent-bridge queue insert` and consumed FIFO by the owning channel's controller, which delivers each result (or failure/timeout notice) to the chat bound with `/queue-here`. Like scheduled tasks, queue runs are fully isolated from the target chat's own session. Both scheduled tasks and event queues use the same completion protocol: the run ends when the agent appends the `BRIDGE_TASK_STATUS_DONE` marker as the last line of its final message, at which point the full accumulated transcript is delivered once; a silence probe asks an inactive run whether it is finished, and the wall-clock `timeout` remains the hard cap.
+Event queues let you run a stream of agent prompts through the same pipeline as scheduled tasks: a queue definition (`queues/<name>.md`) carries a worker count, an optional model and a shared-context body appended to every task; tasks are inserted with `agent-im-bridge queue insert` and consumed FIFO by the owning channel's controller, which delivers each result (or failure/timeout notice) to the chat bound with `/queue-here`. Like scheduled tasks, queue runs are fully isolated from the target chat's own session. Both scheduled tasks and event queues use the same completion protocol: the run ends when the agent appends the `BRIDGE_TASK_STATUS_DONE` marker as the last line of its final message, at which point the full accumulated transcript is delivered once; a silence probe asks an inactive run whether it is finished, and the wall-clock `timeout` remains the hard cap.
 
 ## Start a session in a specific directory
 
@@ -142,7 +157,7 @@ In practice, this shows up in a few ways:
 - Different channels have very different behavior, and existing integrations are often maintained independently without a shared contract.
 - The local development and runtime experience becomes much more invasive: starting Pi for normal local work can also start multiple channel-facing plugins and inject extra tools that are unrelated to the task at hand.
 
-`agent-bridge` takes the opposite approach: keep the local agent runtime focused, keep channel integration outside the agent process, and make session routing explicit at the bridge layer.
+`agent-im-bridge` takes the opposite approach: keep the local agent runtime focused, keep channel integration outside the agent process, and make session routing explicit at the bridge layer.
 
 ## License
 

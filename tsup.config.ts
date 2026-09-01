@@ -3,7 +3,7 @@ import { defineConfig } from "tsup";
 export default defineConfig([
   {
     entry: {
-      "agent-bridge": "bin/agent-bridge.ts",
+      "agent-im-bridge": "bin/agent-bridge.ts",
       cli: "src/cli.ts",
       index: "src/index.ts",
     },

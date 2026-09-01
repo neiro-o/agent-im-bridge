@@ -22,6 +22,8 @@ export interface LocalMessage {
   clientSessionId: string;
   chatType: "p2p" | "group";
   text: string;
+  /** Sender open_id, present when the channel provides it (Feishu does). */
+  senderId?: string;
   attachments?: InboundAttachment[];
 }
 
@@ -40,6 +42,15 @@ export interface ChatModeControllerOptions {
   config: ChatModeControllerConfig;
   loadWorkingDirectory?: (clientSessionId: string) => Promise<string | undefined>;
   saveWorkingDirectory?: (clientSessionId: string, cwd: string) => Promise<void>;
+  /**
+   * Additional user-level gate for entering SSH mode, evaluated after the
+   * chat-level allowlist (`#isAuthorized`). Wired by the adapter to the user
+   * access controller's "ssh" grant; when absent, the chat allowlist alone
+   * decides (legacy behavior).
+   */
+  authorizeSsh?: (message: LocalMessage) => Promise<boolean>;
+  /** Renders the SSH user-denial reply (localized by the adapter). */
+  sshDeniedText?: (senderId?: string) => string;
 }
 
 /** Per-chat state machine for the privileged, authorized local-control mode. */
@@ -50,6 +61,8 @@ export class ChatModeController {
   readonly #transfer: FileTransferService;
   readonly #loadWorkingDirectory?: ChatModeControllerOptions["loadWorkingDirectory"];
   readonly #saveWorkingDirectory?: ChatModeControllerOptions["saveWorkingDirectory"];
+  readonly #authorizeSsh?: ChatModeControllerOptions["authorizeSsh"];
+  readonly #sshDeniedText?: ChatModeControllerOptions["sshDeniedText"];
   readonly #states = new Map<string, ChatState>();
   readonly #queues = new Map<string, Promise<unknown>>();
 
@@ -68,6 +81,8 @@ export class ChatModeController {
     });
     this.#loadWorkingDirectory = options.loadWorkingDirectory;
     this.#saveWorkingDirectory = options.saveWorkingDirectory;
+    this.#authorizeSsh = options.authorizeSsh;
+    this.#sshDeniedText = options.sshDeniedText;
   }
 
   handle(message: LocalMessage): Promise<LocalAction[]> {
@@ -102,6 +117,12 @@ export class ChatModeController {
     if (/^\/ssh$/i.test(text)) {
       if (!this.#isAuthorized(message)) {
         return [{ type: "reply", text: "当前聊天未获授权使用 SSH 模式。" }];
+      }
+      if (this.#authorizeSsh && !(await this.#authorizeSsh(message))) {
+        return [{
+          type: "reply",
+          text: this.#sshDeniedText?.(message.senderId) ?? "当前账号未获授权使用 SSH 模式。",
+        }];
       }
       const remembered = state.cwd ?? await this.#loadWorkingDirectory?.(message.clientSessionId);
       state.cwd = await this.#policy.resolveDirectory(

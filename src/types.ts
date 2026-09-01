@@ -453,6 +453,18 @@ export interface LocalControlConfig {
   uploadSingleShot?: boolean;
 }
 
+/**
+ * User-level access control for a channel. When enabled, only users approved
+ * by an administrator (via `agent-bridge access approve <open-id>`) can talk
+ * to the bot; everyone else is recorded as a pending request and gets a
+ * throttled "waiting for approval" reply. The allowlist lives in
+ * `authz.json` next to the config file so CLI approvals apply to a running
+ * bridge without a restart.
+ */
+export interface AccessControlConfig {
+  enabled?: boolean;
+}
+
 export interface FeishuClientConfig {
   appId: string;
   appSecret: string;
@@ -461,6 +473,7 @@ export interface FeishuClientConfig {
   verificationToken?: string;
   requireMentionInGroup?: boolean;
   localControl?: LocalControlConfig;
+  accessControl?: AccessControlConfig;
 }
 
 export interface WecomClientConfig {
@@ -781,6 +794,9 @@ export interface FeishuInboundMessage {
   messageId: string;
   text: string;
   mentionedBot?: boolean;
+  /** Sender open_id and display name (used by user-level access control). */
+  senderId?: string;
+  senderName?: string;
   attachments?: InboundAttachment[];
   raw?: unknown;
 }

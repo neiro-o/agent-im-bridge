@@ -17,7 +17,18 @@ import type {
 import { createPromptContext } from "./config/prompt";
 import { removeSessionBindingStore } from "./config/session-bindings";
 import { getConfigPath, loadConfig, saveConfig } from "./config/store";
+import {
+  approveUser,
+  denyUser,
+  getAccessFilePath,
+  loadAccessFile,
+  revokeUser,
+  updateAccessFile,
+  type AccessChannelState,
+  type AccessGrant,
+} from "./modules/client/access/access-store";
 import { runChannel } from "./core/channel-runner";
+import { setupFeishuChannel } from "./cli-feishu-setup";
 import { DEFAULT_LOCALE, getTranslatorForCommon } from "./i18n";
 import { getAgentModule, listAgentModules } from "./modules/agent";
 import { getClientModule, listClientModules } from "./modules/client";
@@ -757,6 +768,157 @@ async function queueHistory(queueName: string): Promise<void> {
   );
 }
 
+// ---------------------------------------------------------------------------
+// access command group (user-level authorization)
+//
+// The allowlist lives in `~/.config/agent-bridge/authz.json` (override with
+// AGENT_BRIDGE_AUTHZ_PATH). The running bridge re-reads the file on every
+// inbound message, so CLI approvals take effect immediately — no restart.
+// ---------------------------------------------------------------------------
+
+interface AccessCommandOptions {
+  channel?: string;
+}
+
+function accessChannelsWith(
+  file: Awaited<ReturnType<typeof loadAccessFile>>,
+  openId: string,
+  kind: keyof AccessChannelState,
+): string[] {
+  return Object.entries(file.channels)
+    .filter(([, state]) => state[kind][openId] !== undefined)
+    .map(([name]) => name);
+}
+
+/**
+ * Resolves the channel an access command applies to: the explicit `--channel`
+ * wins; otherwise the channel is inferred when exactly one channel references
+ * the user (or, for pre-authorization, when only one channel is configured).
+ */
+async function resolveAccessChannel(
+  options: AccessCommandOptions,
+  openId: string,
+  kinds: Array<keyof AccessChannelState>,
+): Promise<string> {
+  if (options.channel) return options.channel;
+  const file = await loadAccessFile();
+  const matches = [...new Set(kinds.flatMap((kind) => accessChannelsWith(file, openId, kind)))];
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length === 0) {
+    const config = await loadConfig();
+    const names = Object.keys(config.channels);
+    if (names.length === 1) return names[0]!;
+    throw new Error(
+      `No pending/authorized record for ${openId}. Pass --channel (configured: ${names.join(", ") || "none"}).`,
+    );
+  }
+  throw new Error(`User ${openId} appears in multiple channels (${matches.join(", ")}). Pass --channel.`);
+}
+
+function printTable(rows: Array<Record<string, string>>): void {
+  if (rows.length === 0) return;
+  const headers = Object.keys(rows[0]!);
+  const widths = headers.map((header) =>
+    Math.max(header.length, ...rows.map((row) => row[header]!.length)),
+  );
+  console.log(headers.map((header, index) => header.padEnd(widths[index])).join("  ").trimEnd());
+  for (const row of rows) {
+    console.log(headers.map((header, index) => row[header]!.padEnd(widths[index])).join("  ").trimEnd());
+  }
+}
+
+/** `agent-bridge access pending`: every channel's pending authorization requests. */
+async function listAccessPending(options: AccessCommandOptions): Promise<void> {
+  const file = await loadAccessFile();
+  const rows: Array<Record<string, string>> = [];
+  for (const [channel, state] of Object.entries(file.channels)) {
+    if (options.channel && channel !== options.channel) continue;
+    for (const [openId, record] of Object.entries(state.pending)) {
+      rows.push({
+        Channel: channel,
+        "Open ID": openId,
+        Name: record.name ?? "-",
+        Chat: record.chatId,
+        Requests: String(record.requestCount),
+        "Last seen": new Date(record.lastSeenAt).toLocaleString(),
+      });
+    }
+  }
+  if (rows.length === 0) {
+    console.log("No pending access requests.");
+    return;
+  }
+  printTable(rows);
+  console.log("\nApprove with: agent-bridge access approve <open-id> [--ssh] [--channel <name>]");
+}
+
+/** `agent-bridge access list`: authorized users (and denied list for visibility). */
+async function listAccessUsers(options: AccessCommandOptions): Promise<void> {
+  const file = await loadAccessFile();
+  const rows: Array<Record<string, string>> = [];
+  const deniedRows: Array<Record<string, string>> = [];
+  for (const [channel, state] of Object.entries(file.channels)) {
+    if (options.channel && channel !== options.channel) continue;
+    for (const [openId, record] of Object.entries(state.users)) {
+      rows.push({
+        Channel: channel,
+        "Open ID": openId,
+        Name: record.name ?? "-",
+        Grants: record.grants.join(","),
+        "Approved at": new Date(record.approvedAt).toLocaleString(),
+      });
+    }
+    for (const [openId, record] of Object.entries(state.denied)) {
+      deniedRows.push({
+        Channel: channel,
+        "Open ID": openId,
+        Name: record.name ?? "-",
+        "Denied at": new Date(record.deniedAt).toLocaleString(),
+      });
+    }
+  }
+  if (rows.length === 0 && deniedRows.length === 0) {
+    console.log("No authorized users yet. Approve with: agent-bridge access approve <open-id>");
+    return;
+  }
+  if (rows.length > 0) printTable(rows);
+  if (deniedRows.length > 0) {
+    console.log(rows.length > 0 ? "\nDenied:" : "Denied:");
+    printTable(deniedRows);
+  }
+}
+
+/** `agent-bridge access approve <open-id> [--ssh]`: grant access. */
+async function approveAccessUser(
+  openId: string,
+  options: AccessCommandOptions & { ssh?: boolean },
+): Promise<void> {
+  const channel = await resolveAccessChannel(options, openId, ["pending", "users"]);
+  const grants: AccessGrant[] = options.ssh ? ["agent", "ssh"] : ["agent"];
+  await updateAccessFile(approveUser(channel, openId, { grants }));
+  console.log(
+    `Approved ${openId} on channel "${channel}" with grants: ${grants.join(", ")}.` +
+      " The running bridge picks this up within seconds (no restart needed).",
+  );
+}
+
+/** `agent-bridge access deny <open-id>`: reject a pending request (silent drop afterwards). */
+async function denyAccessUser(openId: string, options: AccessCommandOptions): Promise<void> {
+  const channel = await resolveAccessChannel(options, openId, ["pending", "users", "denied"]);
+  await updateAccessFile(denyUser(channel, openId));
+  console.log(`Denied ${openId} on channel "${channel}".`);
+}
+
+/** `agent-bridge access revoke <open-id>`: remove an existing authorization. */
+async function revokeAccessUser(openId: string, options: AccessCommandOptions): Promise<void> {
+  const channel = await resolveAccessChannel(options, openId, ["users"]);
+  const removed = await updateAccessFile(revokeUser(channel, openId));
+  if (!removed) {
+    throw new Error(`User ${openId} is not authorized on channel "${channel}".`);
+  }
+  console.log(`Revoked ${openId} on channel "${channel}".`);
+}
+
 export async function runCli(argv = process.argv): Promise<void> {
   const program = new Command();
 
@@ -905,6 +1067,71 @@ export async function runCli(argv = process.argv): Promise<void> {
     .argument("<queue-name>")
     .action(async (queueName: string) => {
       await queueHistory(queueName);
+    });
+
+  const feishu = program.command("feishu").description("Feishu bot helpers");
+
+  feishu
+    .command("setup")
+    .description(
+      "Guided Feishu bot setup: permission checklist with QR links, credential check, live capability probe, channel creation",
+    )
+    .action(async () => {
+      await setupFeishuChannel();
+    });
+
+  const access = program
+    .command("access")
+    .description(
+      "Manage user access authorization (pending requests, approvals) stored in ~/.config/agent-bridge/authz.json",
+    )
+    .addHelpText(
+      "after",
+      "\nThe running bridge re-reads the authz file on every message, so approvals take effect immediately.",
+    );
+
+  access
+    .command("pending")
+    .description("List users waiting for authorization")
+    .option("-c, --channel <name>", "Only show one channel")
+    .action(async (options: AccessCommandOptions) => {
+      await listAccessPending(options);
+    });
+
+  access
+    .command("list")
+    .description("List authorized (and denied) users")
+    .option("-c, --channel <name>", "Only show one channel")
+    .action(async (options: AccessCommandOptions) => {
+      await listAccessUsers(options);
+    });
+
+  access
+    .command("approve")
+    .description("Approve a user (agent access; --ssh also grants SSH mode)")
+    .argument("<open-id>")
+    .option("--ssh", "Also grant SSH mode access")
+    .option("-c, --channel <name>", "Channel to approve on (inferred when unambiguous)")
+    .action(async (openId: string, options: AccessCommandOptions & { ssh?: boolean }) => {
+      await approveAccessUser(openId, options);
+    });
+
+  access
+    .command("deny")
+    .description("Deny a user's access request (their messages are dropped silently)")
+    .argument("<open-id>")
+    .option("-c, --channel <name>", "Channel to deny on (inferred when unambiguous)")
+    .action(async (openId: string, options: AccessCommandOptions) => {
+      await denyAccessUser(openId, options);
+    });
+
+  access
+    .command("revoke")
+    .description("Revoke a user's authorization")
+    .argument("<open-id>")
+    .option("-c, --channel <name>", "Channel to revoke on (inferred when unambiguous)")
+    .action(async (openId: string, options: AccessCommandOptions) => {
+      await revokeAccessUser(openId, options);
     });
 
   await program.parseAsync(argv);

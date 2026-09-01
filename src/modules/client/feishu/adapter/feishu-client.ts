@@ -410,6 +410,8 @@ export class FeishuClient {
       messageId: message.messageId,
       text,
       mentionedBot: message.mentionedBot,
+      senderId: message.senderId,
+      ...(message.senderName !== undefined ? { senderName: message.senderName } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
       raw: message.raw,
     });
